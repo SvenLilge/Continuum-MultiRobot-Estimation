@@ -144,9 +144,6 @@ public:
     //Careful: Will use the last known state (i.e. the last state computed and returned from computeStateEstimate)
     void queryAdditionalStates(SystemState &state, std::vector<std::pair<unsigned int,double>> arclengths);
 
-    //TODO: Should probably move to private
-    static Eigen::Matrix<double,4,1> computeFBGSensorModel(Eigen::Matrix<double,6,1> curvature_strains, double theta_offset, double core_distance);
-    static Eigen::Matrix<double,4,6> computeFBGSensorModelDerivative(Eigen::Matrix<double,6,1> curvature_strains, double theta_offset, double core_distance);
 
 private:
     RobotTopology m_robot_topology;
@@ -183,6 +180,10 @@ private:
     double getPriorCost(SystemState state);
     double getCouplingCost(SystemState state);
     double getMeasurementCost(SystemState state, std::vector<SensorMeasurement> measurements);
+
+    // FBG Sensor model and derivative
+    Eigen::Matrix<double,4,1> computeFBGSensorModel(Eigen::Matrix<double,6,1> curvature_strains, double theta_offset, double core_distance);
+    Eigen::Matrix<double,4,6> computeFBGSensorModelDerivative(Eigen::Matrix<double,6,1> curvature_strains, double theta_offset, double core_distance);
 
     //Constructs the projection matrix of the system based on robot toplogy
     Eigen::SparseMatrix<double> constructProjectionMatrix();
