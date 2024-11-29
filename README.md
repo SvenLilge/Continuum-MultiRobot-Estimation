@@ -31,13 +31,13 @@ The code should compile in Release mode by default (for performance), otherwise 
 	cmake -DCMAKE_BUILD_TYPE=Release ..
 	make
 
-Afterwards, you can execute the example code by running the executable "continuum-multirobot-estimation".
+Afterwards, you can find and execute compiled examples in the 'examples' folder.
 
 ### References
 
 If you found the provided continuum robot state estimation implementation helpful or used parts of it yourself, please refer to it using the following BibTeX entries to cite our work:
 
-[1] State Estimation for Continuum Multi-Robot Systems on SE (3)
+[1] State Estimation for Continuum Multi-Robot Systems on SE(3)
 	 
 	@article{Lilge2024,
 		title={State Estimation for Continuum Multi-Robot Systems on SE (3)},
@@ -46,7 +46,7 @@ If you found the provided continuum robot state estimation implementation helpfu
 		year={2024}
 	}
 
-[2] Continuum Robot State Estimation using Gaussian Process Regression on SE (3)
+[2] Continuum Robot State Estimation using Gaussian Process Regression on SE(3)
 
 	@article{Lilge2022,
 		title={Continuum Robot State Estimation using Gaussian Process Regression on SE (3)},
