@@ -30,11 +30,12 @@ file(GLOB CPP_FILES ${PROJECT_SOURCE_DIR}/src/*.cpp)
 
 # Define the executable
 add_executable(example_1 src/examples/example_1.cpp ${H_FILES} ${CPP_FILES})
+add_executable(example_2 src/examples/example_2.cpp ${H_FILES} ${CPP_FILES})
 
 # Link the necessary libraries
 target_link_libraries(example_1 ${VTK_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(example_2 ${VTK_LIBRARIES} Eigen3::Eigen)
 
 # Set the output directory for the executable
-set_target_properties(example_1 PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples
-)
+set_target_properties(example_1 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
+set_target_properties(example_2 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
