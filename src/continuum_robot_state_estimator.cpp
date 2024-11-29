@@ -305,11 +305,6 @@ void ContinuumRobotStateEstimator::assemblePriorTerms(std::vector<Eigen::Triplet
 
             Eigen::MatrixXd Qc_inv = invert_diagonal(m_hyperparameters.Qc);
 
-            //if(n == 2) // Hack to make one robot stiffer - have to remove
-            //{
-            //    Qc_inv = 2e1*Qc_inv;
-            //}
-
             //Compute error vector at operating point
             Eigen::Matrix<double, 12,1> e;
             e << xi - delta_s*varpi_k,
@@ -441,9 +436,6 @@ void ContinuumRobotStateEstimator::assembleCouplingTerms(std::vector<Eigen::Trip
 
 
         Eigen::MatrixXd R_c_inv = invert_diagonal(m_hyperparameters.R_coupling);
-
-        //if(n1 == 1 && n2 == 2) // Hack to account for uncertainty in coupling
-        //    R_c_inv.bottomRightCorner(1,1) = 2e-5*R_c_inv.bottomRightCorner(1,1);
 
 
         Eigen::MatrixXd A_block = F.transpose()*R_c_inv*F;

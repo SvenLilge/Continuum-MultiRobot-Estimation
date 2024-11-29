@@ -28,25 +28,38 @@ public:
         std::vector<unsigned int> M; // Number of interpolated notes between estimation nodes (must be dimension N)
         std::vector<double> L; // Total arclength of each robot (must be dimension N)
         std::vector<Eigen::Matrix4d> Ti0; // Base frame of each robot T_i0 (i is static/interial frame, while 0 is body frame b of the first node)
+
+        bool common_end_effector; // Indicates whether the topology features a common end-effector
+
+
+        // These values can be set to enforce boundary conditions
+        // If set to true, the first and/or last poses/strains of each robot will be locked to the initial guess
         std::vector<bool> lock_first_pose;
         std::vector<bool> lock_last_pose;
         std::vector<bool> lock_first_strain;
         std::vector<bool> lock_last_strain;
-        std::vector<double> fbg_theta_offset; //TODO: Is this the best spot to store this?
-        std::vector<double> fbg_core_distance; //TODO: Is this the best spot to store this?
-        bool common_end_effector;
+
+        // If the robots are equipped with FBG sensors, the following parameters can be set
+        // They indicate the distance of the central core of the fiber to the remaining cores
+        // and the offset angle of the fiber w.r.t. the robot's backbone
+        std::vector<double> fbg_theta_offset;
+        std::vector<double> fbg_core_distance;
+
         std::vector<Coupling> robot_coupling; // Information on robot coupling
+
     };
 
     struct Hyperparameters
     {
-        //TODO: Move these to the individual measurement and coupling structures, such that each can have an independent uncertainty/covariance
+        // Covanriance matrices for pose and strain measurements
         Eigen::Matrix<double,6,6> R_pose;
         Eigen::Matrix<double,6,6> R_strain;
         Eigen::Matrix<double,4,4> R_fbg_strain;
 
+        // Covariance matrix for coupling constraints
         Eigen::Matrix<double,6,6> R_coupling;
 
+        // Covariance matrix for the prior process noise
         Eigen::Matrix<double,6,6> Qc;
     };
 
@@ -110,8 +123,10 @@ public:
 
         Type type; // Pose or strain measurement
         Eigen::MatrixXd value; // 4x4 Transformation matrix or 6x1 strain vector
-        Eigen::Matrix<int,6,1> mask; // Mask for valid measurement components, first three entries are position/translational strain, last three entries are orientation/rotational strain (e.g. 1,1,1,0,0,0 is only position/translational strain)
-
+        // Mask for valid measurement components, first three entries are position/translational strain,
+        // last three entries are orientation/rotational strain (e.g. 1,1,1,0,0,0 is only position/translational strain)
+        // Ignroed for FBG strain measurements
+        Eigen::Matrix<int,6,1> mask; 
         unsigned int idx_robot; // ID of continuum robot (or end-effector) the measurement belongs to (0 to N, where N is a common end-effector, e.g. a platform)
         unsigned int idx_node; // ID of estimatation node the measurement belongs to (ignored if end-effector)
     };
@@ -138,6 +153,7 @@ public:
     void printNodeInfo(SystemState::RobotState::Node node);
 
     //Computes the and returns state estimate given a set of sensor measurements
+    //Set verbose to true for additional terminal outputs (useful for debugging etc)
     bool computeStateEstimate(SystemState &state, std::vector<double> &cost, std::vector<SensorMeasurement> measurements, bool verbose_mode = false);
 
     //Returns the state estimate of the last estimation computation with additional queried nodes
