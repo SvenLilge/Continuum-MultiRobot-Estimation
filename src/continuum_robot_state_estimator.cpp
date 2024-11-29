@@ -90,6 +90,10 @@ void ContinuumRobotStateEstimator::validateRobotTopology(RobotTopology topology)
     assert((topology.M.size() == topology.N) && "Vector size must be equal to number of robots");
     assert((topology.L.size() == topology.N) && "Vector size must be equal to number of robots");
     assert((topology.Ti0.size() == topology.N) && "Vector size must be equal to number of robots");
+    assert((topology.lock_first_pose.size() == topology.N) && "Vector size must be equal to number of robots");
+    assert((topology.lock_first_strain.size() == topology.N) && "Vector size must be equal to number of robots");
+    assert((topology.lock_last_pose.size() == topology.N) && "Vector size must be equal to number of robots");
+    assert((topology.lock_first_strain.size() == topology.N) && "Vector size must be equal to number of robots");
 
     for(unsigned int i = 0; i < topology.N; i++)
     {
@@ -133,6 +137,7 @@ void ContinuumRobotStateEstimator::validateHyperparameters(Hyperparameters param
     //Go through every variable in structure and make sure their values are valid
     validate_diagonal_matrix(parameters.R_pose);
     validate_diagonal_matrix(parameters.R_strain);
+    validate_diagonal_matrix(parameters.R_fbg_strain);
     validate_diagonal_matrix(parameters.R_coupling);
     validate_diagonal_matrix(parameters.Qc);
 
@@ -193,6 +198,12 @@ void ContinuumRobotStateEstimator::validateMeasurements(std::vector<SensorMeasur
             else if(measurements[i].type == SensorMeasurement::Type::Strain)
             {
                 assert((measurements[i].value.rows() == 6 && measurements[i].value.cols() == 1) && "Vector of strain measurements has to be of dimension 6x1");
+            }
+            else if(measurements[i].type == SensorMeasurement::Type::FBGStrain)
+            {
+                assert((measurements[i].value.rows() == 4 && measurements[i].value.cols() == 1) && "Vector of strain measurements has to be of dimension 4x1");
+                assert((topology.fbg_theta_offset.size() == topology.N) && "Need to set FBG theta offset for each robot");
+                assert((topology.fbg_core_distance.size() == topology.N) && "Need to set FBG core distance for each robot");
             }
         }
 
@@ -735,6 +746,16 @@ void ContinuumRobotStateEstimator::assembleMeasurementTerms(std::vector<Eigen::T
 
                 R_inv = invert_diagonal(m_hyperparameters.R_fbg_strain);
 
+                //CONSIDER MASKING
+                for(unsigned int i = 0; i < 4; i++)
+                {
+                    if(measurement.mask(i,0) == 0)
+                    {
+                        e(i,0) = 0;
+                        F.row(i) << 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0;
+                    }
+                }
+
             }
 
             //Define indexing depending on robot and node ID
@@ -995,6 +1016,15 @@ double ContinuumRobotStateEstimator::getMeasurementCost(ContinuumRobotStateEstim
                 e = fbg_strain_des - fbg_strain_cur;
 
                 R_inv = invert_diagonal(m_hyperparameters.R_fbg_strain);
+
+                //CONSIDER MASKING
+                for(unsigned int i = 0; i < 4; i++)
+                {
+                    if(measurement.mask(i,0) == 0)
+                    {
+                        e(i,0) = 0;
+                    }
+                }
             }
 
 
@@ -1002,8 +1032,6 @@ double ContinuumRobotStateEstimator::getMeasurementCost(ContinuumRobotStateEstim
             cost = cost + 0.5*(e.transpose()*R_inv*e)(0,0);
 
         }
-
-
     }
 
     return cost;
@@ -1930,7 +1958,8 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
     return true;
 }
 
-//Careful: uses the last saved system state!
+//  Careful: uses the last saved system state
+//  Need to solve for state estimate before calling this function
 void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEstimator::SystemState &state, std::vector<std::pair<unsigned int, double>> arclengths)
 {
     state = m_state;

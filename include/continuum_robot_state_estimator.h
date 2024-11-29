@@ -49,7 +49,9 @@ public:
 
     };
 
-    struct Hyperparameters
+    // Ideally one should be able to set those individually for each cost term
+    // For now, the same covariance is used for all measurements/cost term of one type
+    struct Hyperparameters 
     {
         // Covanriance matrices for pose and strain measurements
         Eigen::Matrix<double,6,6> R_pose;
@@ -69,15 +71,18 @@ public:
         {
             struct Node
             {
+                double arclength;
+
+                // State mean
                 Eigen::Matrix4d pose; //Expressed in inertial frame T_ik
                 Eigen::Matrix<double,6,1> strain;
 
+
+                // Standard deviation
                 Eigen::Matrix<double,6,1> pose_std;
                 Eigen::Matrix<double,6,1> strain_std;
 
-                double arclength;
-
-                //Save whole covariance
+                //Covariance matrices
                 Eigen::Matrix3d position_covariance;
                 Eigen::Matrix3d orientation_covariance;
                 Eigen::Matrix3d nu_covariance;
@@ -85,6 +90,7 @@ public:
 
             };
 
+            // Nodes for estimation and interpolation
             std::vector<Node> estimation_nodes;
             std::vector<Node> interpolation_nodes;
             std::vector<Node> queried_nodes;
@@ -106,7 +112,9 @@ public:
 
     struct Options
     {
-        enum InitialGuessType {Straight, Last, Custom}; // Choice of the initial guess of the optimization problem (straight robots, last known system state - if applicable, custom guess - e.g. we can use this to get our guess from strain measurements)
+         // Choice of the initial guess of the optimization problem
+         // (straight robots, last known system state - if applicable, custom guess - e.g. we can use this to get our guess from strain measurements)
+        enum InitialGuessType {Straight, Last, Custom};
         enum Solver {Newton, NewtonLineSearch}; // Solver for the optimization problem
 
         InitialGuessType init_guess_type;
@@ -175,8 +183,6 @@ private:
     Eigen::SimplicialCholesky<Eigen::SparseMatrix<double>> m_solver;
 
     //Validates the parameters within each structure and ensures they are set correctly
-    //TODO: Need to check newly added topology and options parameters
-    //TODO: Need to check FBG strain measurements
     void validateRobotTopology(RobotTopology topology);
     void validateHyperparameters(Hyperparameters parameters);
     void validateOptions(Options options);
