@@ -19,57 +19,70 @@ int main(int argc, char *argv[])
     ContinuumRobotStateEstimator::RobotTopology topology;
 
     // Number of robots
-    topology.N = 2;
+    topology.N =3;
     // Number of total estimation nodes per robot (including the node at the root of each robot)
-    topology.K = std::vector<unsigned int>{21,21};
+    topology.K = std::vector<unsigned int>{31,16,16};
     // Number of interpolated states between estimation nodes per robot
     // M=1 results in no interpolation and the interpolation nodes will be equal to the estimation nodes
     // M=2 results in one additional interpolated node between each estimation node etc
-    topology.M = std::vector<unsigned int>{2,2};
+    topology.M = std::vector<unsigned int>{3,3,3};
     // Lengths of robots
-    topology.L = std::vector<double>{0.20,0.20};
+    topology.L = std::vector<double>{0.30,0.15,0.15};
     //Define if we lock the pose of the robots' ends
-    topology.lock_first_pose = std::vector<bool>{true,true};
-    topology.lock_last_pose = std::vector<bool>{false,false};
-    topology.lock_first_strain = std::vector<bool>{false,false};
-    topology.lock_last_strain = std::vector<bool>{true,true};
+    topology.lock_first_pose = std::vector<bool>{true,true,true};
+    topology.lock_last_pose = std::vector<bool>{false,false,false};
+    topology.lock_first_strain = std::vector<bool>{false,false,false};
+    topology.lock_last_strain = std::vector<bool>{false,false,false};
 
-    topology.fbg_core_distance = std::vector<double>{0,0};
-    topology.fbg_theta_offset = std::vector<double>{0,0};
+    topology.fbg_core_distance = std::vector<double>{0,0,0};
+    topology.fbg_theta_offset = std::vector<double>{0,0,0};
 
 
     topology.Ti0.clear();
 
     Eigen::Matrix4d T1 = Eigen::Matrix4d::Identity();
 
-
-    T1.block(0,3,3,1) << 0,0.05,0;
-
     topology.Ti0.push_back(T1);
 
 
-
     Eigen::Matrix4d T2 = Eigen::Matrix4d::Identity();
+    T2.block(0,0,3,3) << 0,1,0,
+                         -1,0,0,
+                         0,0,1;
 
-    T2.block(0,3,3,1) << 0,-0.05,0;
+    T2.block(0,3,3,1) << 0.1,0.1,0;
 
     topology.Ti0.push_back(T2);
 
 
+
+    Eigen::Matrix4d T3 = Eigen::Matrix4d::Identity();
+    T3.block(0,0,3,3) << 0,-1,0,
+                         1,0,0,
+                         0,0,1;
+
+    T3.block(0,3,3,1) << 0.2,-0.1,0;
+
+    topology.Ti0.push_back(T3);
+
+
+
     //Define coupling
 
-    topology.common_end_effector = true;
+    topology.common_end_effector = false;
 
     topology.robot_coupling.clear();
 
     ContinuumRobotStateEstimator::RobotTopology::Coupling coupling;
-    coupling.idxA = 0;
-    coupling.idxB = 2;
-    coupling.coupling_node_robot_A = (topology.K.at(0)-1); //not needed for EE
-    coupling.coupling_node_robot_B = 0; //not needed for EE
+    coupling.idxA = 1;
+    coupling.idxB = 0;
+    coupling.coupling_node_robot_A = (topology.K.at(1)-1); //not needed for EE
+    coupling.coupling_node_robot_B = (topology.K.at(0)-4)/2; //not needed for EE
     coupling.T_bA_c = Eigen::Matrix4d::Identity();
     coupling.T_bB_c = Eigen::Matrix4d::Identity();
-    coupling.T_bB_c.block(0,3,3,1) << 0,0.05,0;
+    coupling.T_bB_c.block(0,0,3,3) << 0,1,0,
+                                      -1,0,0,
+                                      0,0,1;
 
     Eigen::Matrix<int,6,1> mask_coupling;
     mask_coupling << 1,1,1,1,1,1; // first three are position, last three orientation
@@ -78,18 +91,22 @@ int main(int argc, char *argv[])
     topology.robot_coupling.push_back(coupling);
 
 
-    coupling.idxA = 1;
-    coupling.idxB = 2;
-    coupling.coupling_node_robot_A = (topology.K.at(1)-1); //not needed for EE
-    coupling.coupling_node_robot_B = 0; //not needed for EE
+
+    coupling.idxA = 2;
+    coupling.idxB = 0;
+    coupling.coupling_node_robot_A = (topology.K.at(2)-1); //not needed for EE
+    coupling.coupling_node_robot_B = (topology.K.at(0)-4); //not needed for EE
     coupling.T_bA_c = Eigen::Matrix4d::Identity();
     coupling.T_bB_c = Eigen::Matrix4d::Identity();
-    coupling.T_bB_c.block(0,3,3,1) << 0,-0.05,0;
+    coupling.T_bB_c.block(0,0,3,3) << 0,-1,0,
+                                      1,0,0,
+                                      0,0,1;
 
     mask_coupling << 1,1,1,1,1,1; // first three are position, last three orientation
     coupling.mask = mask_coupling;
 
     topology.robot_coupling.push_back(coupling);
+
 
     //Noise on measurements
     double R_p = 2*1e-3;
@@ -118,18 +135,18 @@ int main(int argc, char *argv[])
 
 
     Eigen::Matrix<double,6,1> Qc;
-    Qc << 1e0, 1e0, 1e0, 1e0, 1e0, 1e0;
+    Qc << 1e-1, 1e-1, 1e-1, 1e2, 1e2, 1e2;
 
 
 
-    params.R_pose = 2e0*R_pose.asDiagonal();
+    params.R_pose = 1*R_pose.asDiagonal();
     params.R_strain = 10*R_strain.asDiagonal();
 
     params.R_fbg_strain = 20e0*R_fbg_strain.asDiagonal();
 
-    params.R_coupling = 1*1e-10*R_coupling.asDiagonal();
+    params.R_coupling = 0.5*1e-6*R_coupling.asDiagonal();
 
-    params.Qc = 4e0*Qc.asDiagonal();
+    params.Qc = 1e0*Qc.asDiagonal();
 
 
 
@@ -142,7 +159,7 @@ int main(int argc, char *argv[])
     options.solver = ContinuumRobotStateEstimator::Options::Solver::NewtonLineSearch;
     options.max_optimization_iterations = 200;
     options.kirchhoff_rods = true;
-    options.convergence_threshold = 5e-1;
+    options.convergence_threshold = 5e1;
 
 
     ContinuumRobotStateEstimator state_estimator(topology, params, options);
@@ -155,14 +172,15 @@ int main(int argc, char *argv[])
     ContinuumRobotStateEstimator::SensorMeasurement mes;
     Eigen::Matrix4d pose = Eigen::Matrix4d::Identity();
 
-    pose.block(0,3,3,1) << 0.1273, 0, 0.1273;
+    pose.block(0,3,3,1) << 0.2, 0.05, 0;
 
     mes.type = ContinuumRobotStateEstimator::SensorMeasurement::Pose;
-    mes.idx_robot = 2;
-    mes.idx_node = 0;
+    mes.idx_robot = 0;
+    mes.idx_node = 30;
     mes.mask = Eigen::Matrix<int,6,1>(1,1,1,0,0,0);
     mes.value = pose;
     measurements.push_back(mes);
+
 
     //Run state estimator
     ContinuumRobotStateEstimator::SystemState state;
@@ -171,7 +189,7 @@ int main(int argc, char *argv[])
     //Compute the state estimate at the estimation node and interpolate intermediate nodes as specified by M
     state_estimator.computeStateEstimate(state,cost,measurements,true);
 
-    // state_estimator.printStateMean(state);
+    state_estimator.printStateMean(state);
 
     Visualizer vis(topology);
 
