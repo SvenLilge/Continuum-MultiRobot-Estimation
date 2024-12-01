@@ -29,13 +29,16 @@ file(GLOB H_FILES ${PROJECT_SOURCE_DIR}/include/*.h)
 file(GLOB CPP_FILES ${PROJECT_SOURCE_DIR}/src/*.cpp)
 
 # Define the executable
-add_executable(example_1 src/examples/example_1.cpp ${H_FILES} ${CPP_FILES})
-add_executable(example_2 src/examples/example_2.cpp ${H_FILES} ${CPP_FILES})
+add_executable(1_continuum_robot src/examples/1_continuum_robot.cpp ${H_FILES} ${CPP_FILES})
+add_executable(2_parallel_continuum_robot src/examples/2_parallel_continuum_robot.cpp ${H_FILES} ${CPP_FILES})
+add_executable(3_continuous_stewart_gough src/examples/3_continuous_stewart_gough.cpp ${H_FILES} ${CPP_FILES})
 
 # Link the necessary libraries
-target_link_libraries(example_1 ${VTK_LIBRARIES} Eigen3::Eigen)
-target_link_libraries(example_2 ${VTK_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(1_continuum_robot ${VTK_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(2_parallel_continuum_robot ${VTK_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(3_continuous_stewart_gough ${VTK_LIBRARIES} Eigen3::Eigen)
 
 # Set the output directory for the executable
-set_target_properties(example_1 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
-set_target_properties(example_2 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
+set_target_properties(1_continuum_robot PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
+set_target_properties(2_parallel_continuum_robot PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
+set_target_properties(3_continuous_stewart_gough PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)

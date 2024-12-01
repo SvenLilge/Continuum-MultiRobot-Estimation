@@ -27,7 +27,7 @@ int main(int argc, char *argv[])
     // M=2 results in one additional interpolated node between each estimation node etc
     topology.M = std::vector<unsigned int>{2,2,2,2,2,2};
     // Lengths of robots
-    topology.L = std::vector<double>{0.30,0.30,0.30,0.30,0.30,0.30};
+    topology.L = std::vector<double>{0.15,0.15,0.15,0.15,0.15,0.15};
     //Define if we lock the pose of the robots' ends
     topology.lock_first_pose = std::vector<bool>{true,true,true,true,true,true};
     topology.lock_last_pose = std::vector<bool>{false,false,false,false,false,false};
@@ -41,7 +41,7 @@ int main(int argc, char *argv[])
     topology.Ti0.clear();
 
 
-    double radius = 0.05;
+    double radius = 0.03;
     double init_offset = 30.0/180*M_PI;
 
     double offset_two_legs = 30.0/180*M_PI;
@@ -162,7 +162,7 @@ int main(int argc, char *argv[])
 
     params.R_coupling = 0.5*1e-6*R_coupling.asDiagonal();
 
-    params.Qc = 0.05e0*Qc.asDiagonal();
+    params.Qc = 0.5e0*Qc.asDiagonal();
 
     //Define solver options
     ContinuumRobotStateEstimator::Options options;
@@ -171,7 +171,7 @@ int main(int argc, char *argv[])
     options.solver = ContinuumRobotStateEstimator::Options::Solver::NewtonLineSearch;
     options.max_optimization_iterations = 200;
     options.kirchhoff_rods = true;
-    options.convergence_threshold = 5e-1;
+    options.convergence_threshold = 5e1;
 
 
     ContinuumRobotStateEstimator state_estimator(topology, params, options);
@@ -188,7 +188,7 @@ int main(int argc, char *argv[])
     //Compute the state estimate at the estimation node and interpolate intermediate nodes as specified by M
     state_estimator.computeStateEstimate(state,cost,measurements,true);
 
-    state_estimator.printStateMean(state);
+    // state_estimator.printStateMean(state);
 
     Visualizer vis(topology);
 

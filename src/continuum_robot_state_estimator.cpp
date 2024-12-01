@@ -202,8 +202,8 @@ void ContinuumRobotStateEstimator::validateMeasurements(std::vector<SensorMeasur
             else if(measurements[i].type == SensorMeasurement::Type::FBGStrain)
             {
                 assert((measurements[i].value.rows() == 4 && measurements[i].value.cols() == 1) && "Vector of strain measurements has to be of dimension 4x1");
-                assert((topology.fbg_theta_offset.size() == topology.N) && "Need to set FBG theta offset for each robot");
-                assert((topology.fbg_core_distance.size() == topology.N) && "Need to set FBG core distance for each robot");
+                assert((m_robot_topology.fbg_theta_offset.size() == m_robot_topology.N) && "Need to set FBG theta offset for each robot");
+                assert((m_robot_topology.fbg_core_distance.size() == m_robot_topology.N) && "Need to set FBG core distance for each robot");
             }
         }
 
