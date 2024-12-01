@@ -109,32 +109,32 @@ int main(int argc, char *argv[])
     //Strains
     for(unsigned int i = 0; i < 11; i++)
     {
-        ContinuumRobotStateEstimator::SensorMeasurement mes;
+        ContinuumRobotStateEstimator::SensorMeasurement meas;
         Eigen::Matrix<double,6,1> strain;;
 
         strain << 1, 0, 0, 0, 10, 0;
 
-        mes.type = ContinuumRobotStateEstimator::SensorMeasurement::Strain;
-        mes.idx_robot = 0;
-        mes.idx_node = i;
-        mes.mask = Eigen::Matrix<int,6,1>(1,1,1,1,1,1);
-        mes.value = strain;
-        measurements.push_back(mes);
+        meas.type = ContinuumRobotStateEstimator::SensorMeasurement::Strain;
+        meas.idx_robot = 0;
+        meas.idx_node = i;
+        meas.mask = Eigen::Matrix<int,6,1>(1,1,1,1,1,1);
+        meas.value = strain;
+        measurements.push_back(meas);
     }
 
     for(unsigned int i = 11; i < 21; i++)
     {
-        ContinuumRobotStateEstimator::SensorMeasurement mes;
+        ContinuumRobotStateEstimator::SensorMeasurement meas;
         Eigen::Matrix<double,6,1> strain;;
 
         strain << 1, 0, 0, 0, -10, 0;
 
-        mes.type = ContinuumRobotStateEstimator::SensorMeasurement::Strain;
-        mes.idx_robot = 0;
-        mes.idx_node = i;
-        mes.mask = Eigen::Matrix<int,6,1>(1,1,1,1,1,1);
-        mes.value = strain;
-        measurements.push_back(mes);
+        meas.type = ContinuumRobotStateEstimator::SensorMeasurement::Strain;
+        meas.idx_robot = 0;
+        meas.idx_node = i;
+        meas.mask = Eigen::Matrix<int,6,1>(1,1,1,1,1,1);
+        meas.value = strain;
+        measurements.push_back(meas);
     }
 
 

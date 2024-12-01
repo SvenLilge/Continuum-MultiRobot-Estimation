@@ -152,17 +152,17 @@ int main(int argc, char *argv[])
     std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements;
 
     //Pose
-    ContinuumRobotStateEstimator::SensorMeasurement mes;
+    ContinuumRobotStateEstimator::SensorMeasurement meas;
     Eigen::Matrix4d pose = Eigen::Matrix4d::Identity();
 
     pose.block(0,3,3,1) << 0.1273, 0, 0.1273;
 
-    mes.type = ContinuumRobotStateEstimator::SensorMeasurement::Pose;
-    mes.idx_robot = 2;
-    mes.idx_node = 0;
-    mes.mask = Eigen::Matrix<int,6,1>(1,1,1,0,0,0);
-    mes.value = pose;
-    measurements.push_back(mes);
+    meas.type = ContinuumRobotStateEstimator::SensorMeasurement::Pose;
+    meas.idx_robot = 2;
+    meas.idx_node = 0;
+    meas.mask = Eigen::Matrix<int,6,1>(1,1,1,0,0,0);
+    meas.value = pose;
+    measurements.push_back(meas);
 
     //Run state estimator
     ContinuumRobotStateEstimator::SystemState state;

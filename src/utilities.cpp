@@ -132,7 +132,7 @@ Eigen::MatrixXd rot_to_vec(Eigen::MatrixXd C)
         // Try each eigenvalue
         for (int i = 0; i < 3; i++) {
           // Check if eigen value is near +1.0
-          if (fabs(eigenSolver.eigenvalues()[i] - 1.0) < 1e-6) {
+          if (fabs(eigenSolver.eigenvalues()[i] - 1.0) < 1e-3) {
             // Get corresponding angle-axis
             Eigen::Vector3d aaxis_ba = phi_ba * eigenSolver.eigenvectors().col(i);
             return aaxis_ba;
