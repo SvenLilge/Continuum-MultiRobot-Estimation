@@ -31,6 +31,14 @@ The code should compile in Release mode by default (for performance), otherwise 
 	cmake -DCMAKE_BUILD_TYPE=Release ..
 	make
 
+Alternatively, the code can be compiled in Debug mode, enabling useful asserts for debugging:
+	
+	mkdir build
+	cd build
+	cmake -DCMAKE_BUILD_TYPE=Debug ..
+	make
+
+
 Afterwards, you can find and execute compiled examples in the 'examples' folder.
 
 ### References
