@@ -3,13 +3,6 @@ set(CMAKE_CXX_STANDARD 17)
 
 project(continuum-multirobot-estimation)
 
-# Force Release mode unless specified otherwise
-if (NOT EXISTS ${CMAKE_BINARY_DIR}/CMakeCache.txt)
-  if (NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
-  endif()
-endif()
-
 #Important CMAKE stuff
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
