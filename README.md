@@ -39,7 +39,13 @@ Alternatively, the code can be compiled in Debug mode, enabling useful asserts (
 	make
 
 
-Afterwards, you can find and execute compiled examples in the 'examples' folder.
+Afterwards, you can find compiled examples in the 'examples' folder that you can execute by running:
+	
+	./examples/1_continuum_robot
+ 	./examples/2_parallel_continuum_robot
+ 	./examples/3_continuous_stewart_gough
+ 	./examples/4_collaborative_continuum_robots
+ 	./examples/5_fbg_measurements
 
 ### References
 
