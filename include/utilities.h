@@ -3,6 +3,7 @@
 
 #include <Eigen/Core>
 #include <fstream>
+#include <vector>
 
 //Generate the nth Bernoulli number (hard coded for performance)
 double bernoulli_number(unsigned int n);
