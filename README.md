@@ -24,20 +24,12 @@ In the root directory of the C++ code run the following commands:
 	cmake ..
 	make
 
-The code should compile in Release mode by default (for performance), otherwise this can be forced with:
+The code compiles in Debug mode by default, which enables useful asserts (validating inputs etc.) and proper error messages for debugging purposes. Alternatively, the code can be compiled in Release mode, which significantly increases the performance w.r.t. computation speed, by running the following commands:
 	
 	mkdir build
 	cd build
 	cmake -DCMAKE_BUILD_TYPE=Release ..
 	make
-
-Alternatively, the code can be compiled in Debug mode, enabling useful asserts (validating inputs etc.) for debugging:
-	
-	mkdir build
-	cd build
-	cmake -DCMAKE_BUILD_TYPE=Debug ..
-	make
-
 
 Afterwards, you can find compiled examples in the 'examples' folder. From within this folder, you can execute the examples with:
 	
