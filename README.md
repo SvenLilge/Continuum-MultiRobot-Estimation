@@ -6,7 +6,7 @@ State Estimation for Continuum Multi-Robot Systems on SE(3)\
 Sven Lilge, Timothy D. Barfoot, Jessica Burgner-Kahrs\
 IEEE Transactions on Robotics 2024 (To appear)
 
-Detailed instructions on how to use this code will be added shortly!
+**Detailed instructions on how to use this code [can be found here](https://github.com/SvenLilge/Continuum-MultiRobot-Estimation/wiki/Documentation)!**
 
 ### Dependencies (C++)
 
