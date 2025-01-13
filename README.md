@@ -47,9 +47,9 @@ If you found the provided continuum robot state estimation implementation helpfu
 	 
 	@article{Lilge2024,
 		  author={Lilge, Sven and Barfoot, Timothy D. and Burgner-Kahrs, Jessica},
-    		  journal={IEEE Transactions on Robotics}, 
+		  journal={IEEE Transactions on Robotics}, 
   	 	  title={State Estimation for Continuum Multi-Robot Systems on SE(3)}, 
-       		  year={2024},  
+		  year={2024},  
 	   	  volume={},
   		  number={},
   		  pages={1-20}
