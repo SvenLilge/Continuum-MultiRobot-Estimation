@@ -46,10 +46,13 @@ If you found the provided continuum robot state estimation implementation helpfu
 [1] State Estimation for Continuum Multi-Robot Systems on SE(3)
 	 
 	@article{Lilge2024,
-		title={State Estimation for Continuum Multi-Robot Systems on SE (3)},
-		author={Lilge, Sven and Barfoot, Timothy D and Burgner-Kahrs, Jessica},
-		journal={arXiv preprint arXiv:2401.13540},
-		year={2024}
+		  author={Lilge, Sven and Barfoot, Timothy D. and Burgner-Kahrs, Jessica},
+    		  journal={IEEE Transactions on Robotics}, 
+  	 	  title={State Estimation for Continuum Multi-Robot Systems on SE(3)}, 
+       		  year={2024},  
+	   	  volume={},
+  		  number={},
+  		  pages={1-20}
 	}
 
 [2] Continuum Robot State Estimation using Gaussian Process Regression on SE(3)
