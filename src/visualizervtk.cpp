@@ -10,6 +10,12 @@
 #include <vtkMapper.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkTubeFilter.h>
+#include <vtkAssembly.h>
+#include <vtkLine.h>
+#include <vtkLineSource.h>
+#include <vtkTransform.h>
+
+#include <utilities.h>
 /**
  * Constructor.
  * @brief Visualizer::Visualizer
@@ -40,18 +46,165 @@ vtkSmartPointer<vtkRenderWindow> Visualizer::getRenderWindow() {
 void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool render_frames, bool render_covariance, int n_std)
 {
     //Backbones
-    for(unsigned int n = 0; n < m_topology.N; n++)
-    {
-        //Run through all interpolation nodes
+    double transparency = 1; // Set transparency level (0.0 = fully transparent, 1.0 = fully opaque)
 
-        for(unsigned int m = 0; m < state.robots[n].interpolation_nodes.size(); m++)
-        {
-            Eigen::Vector3d pos = state.robots[n].interpolation_nodes[m].pose.block(0,3,3,1);
+    vtkSmartPointer<vtkAssembly> assembly = vtkSmartPointer<vtkAssembly>::New();
 
-            mp_backbone_points[n]->SetPoint(m,pos(0),pos(1),pos(2)); //Set the point of the line
+    for (int n = 0; n < state.robots.size(); ++n) {
+        for (int i = 0; i < state.robots.at(n).estimation_nodes.size(); ++i) {
+            Eigen::Matrix4d transform = state.robots.at(n).estimation_nodes.at(i).pose.inverse();
+            // Invert transform exploiting the fact that its a rigid body transform
+            Eigen::Matrix3d rotation = transform.block<3, 3>(0, 0);
+            Eigen::Matrix3d rotation_transpose = rotation.transpose();
+            transform.block<3, 3>(0, 0) = rotation_transpose;
+            transform.block<3, 1>(0, 3) = -rotation_transpose * transform.block<3, 1>(0, 3);
+
+            vtkSmartPointer<vtkMatrix4x4> vtk_transform = vtkSmartPointer<vtkMatrix4x4>::New();
+            for (int r = 0; r < 4; ++r) {
+                for (int c = 0; c < 4; ++c) {
+                    vtk_transform->SetElement(r, c, transform(r, c));
+                }
+            }
+
+            if(i == state.robots.at(n).estimation_nodes.size() - 1)
+            {
+                vtkSmartPointer<vtkSphereSource> half_sphere = vtkSmartPointer<vtkSphereSource>::New();
+                half_sphere->SetRadius(0.005);
+                half_sphere->SetPhiResolution(50);
+                half_sphere->SetThetaResolution(50);
+                half_sphere->SetStartTheta(0.0);
+                half_sphere->SetEndTheta(180.0); // Only generate half sphere
+                half_sphere->SetCenter(0.0, 0.0, 0.0);
+
+                vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+                mapper->SetInputConnection(half_sphere->GetOutputPort());
+
+                vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
+                actor->SetMapper(mapper);
+                vtkSmartPointer<vtkTransform> rotation_transform = vtkSmartPointer<vtkTransform>::New();
+                rotation_transform->RotateZ(-90); // Rotate half sphere to align with x-axis
+                vtkSmartPointer<vtkTransform> final_transform = vtkSmartPointer<vtkTransform>::New();
+                final_transform->Concatenate(vtk_transform);
+                final_transform->Concatenate(rotation_transform);
+                actor->SetUserTransform(final_transform);
+
+                vtkSmartPointer<vtkProperty> property = vtkSmartPointer<vtkProperty>::New();
+                property->SetColor(0.5, 0.5, 0.5); // Grey color for plastic
+                property->SetColor(0.3,0.3,0.3); // Grey color for plastic
+                property->SetSpecular(0.1); // Lower specular to make it look less shiny
+                property->SetSpecularPower(5); // Lower specular power for a more matte finish
+                property->SetInterpolationToPhong(); // Use Phong interpolation for a more realistic look
+                property->SetRepresentationToSurface(); // Ensure the representation is set to surface
+                property->SetOpacity(transparency); // Apply transparency
+                actor->SetProperty(property);
+
+                assembly->AddPart(actor);
+            }
+
+            // Draw connecting line to the next state
+            if (i < state.robots.at(n).estimation_nodes.size() - 1) {
+                Eigen::Vector3d start_point = transform.block<3, 1>(0, 3);
+                Eigen::Matrix4d next_transform = state.robots.at(n).estimation_nodes.at(i + 1).pose.inverse();
+                Eigen::Matrix3d next_rotation = next_transform.block<3, 3>(0, 0);
+                Eigen::Matrix3d next_rotation_transpose = next_rotation.transpose();
+                next_transform.block<3, 3>(0, 0) = next_rotation_transpose;
+                next_transform.block<3, 1>(0, 3) = -next_rotation_transpose * next_transform.block<3, 1>(0, 3);
+                Eigen::Vector3d end_point = next_transform.block<3, 1>(0, 3);
+                // get start and end strain from the robot_state (last 6 columns of robot_state row)
+                Eigen::VectorXd strain = state.robots.at(n).estimation_nodes.at(i).strain;
+                Eigen::VectorXd next_strain = state.robots.at(n).estimation_nodes.at(i + 1).strain;
+
+                Eigen::Vector3d previous_point = start_point;
+                for (int j = 1; j <= 20; ++j) {
+                    double a = j / 20.0;
+                    double s_interval = 0.03;
+
+                    // Operate in the lie algebra
+                    Eigen::MatrixXd xi_k1 = tran_to_vec(next_transform.inverse() * transform);
+
+                    Eigen::MatrixXd Jinv = vec_to_jac_inverse(xi_k1);
+                    Eigen::Matrix<double, 6, 1> xi_k_dot = -1 * strain;
+                    Eigen::Matrix<double, 6, 1> xi_k1_dot = -1 * Jinv * next_strain;
+
+                    Eigen::MatrixXd xi_tau = (a * a * a - 2 * a * a + a) * s_interval * xi_k_dot + (3 * a * a - 2 * a * a * a) * xi_k1 + (a * a * a - a * a) * s_interval * xi_k1_dot;
+                    Eigen::MatrixXd xi_dot_tau = ((3 * a * a - 4 * a + 1) * s_interval * xi_k_dot + (6 * a - 6 * a * a) * xi_k1 + (3 * a * a - 2 * a) * s_interval * xi_k1_dot) / s_interval;
+
+                    Eigen::Matrix4d T_diff_step = vec_to_tran(xi_tau);
+
+                    Eigen::Matrix4d T_cur = transform * T_diff_step.inverse();
+
+                    Eigen::Vector3d interpolated_point = T_cur.block<3, 1>(0, 3);
+
+                    vtkSmartPointer<vtkLineSource> line_source = vtkSmartPointer<vtkLineSource>::New();
+                    line_source->SetPoint1(previous_point(0), previous_point(1), previous_point(2));
+                    line_source->SetPoint2(interpolated_point(0), interpolated_point(1), interpolated_point(2));
+
+                    vtkSmartPointer<vtkPolyDataMapper> line_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+                    line_mapper->SetInputConnection(line_source->GetOutputPort());
+
+                    vtkSmartPointer<vtkTubeFilter> tube_filter = vtkSmartPointer<vtkTubeFilter>::New();
+                    tube_filter->SetInputConnection(line_source->GetOutputPort());
+                    tube_filter->SetRadius(0.00075); // Set the radius of the tube
+                    tube_filter->SetRadius(0.005); // Set the radius of the tube
+                    tube_filter->SetNumberOfSides(50); // Set the number of sides for the tube to make it smooth
+                    tube_filter->Update();
+
+                    vtkSmartPointer<vtkPolyDataMapper> tube_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+                    tube_mapper->SetInputConnection(tube_filter->GetOutputPort());
+
+                    vtkSmartPointer<vtkActor> tube_actor = vtkSmartPointer<vtkActor>::New();
+                    tube_actor->SetMapper(tube_mapper);
+                    tube_actor->GetProperty()->SetColor(0.8, 0.8, 0.8); // Black color for the tube
+                    if(j <= 3)
+                    {
+                        tube_actor->GetProperty()->SetColor(0.3, 0.3, 0.3); // Black color for the tube
+                    }
+                    tube_actor->GetProperty()->SetSpecular(1.0); // Set specular to make it metallic
+                    tube_actor->GetProperty()->SetSpecularPower(50); // Set specular power for shininess
+                    tube_actor->GetProperty()->SetOpacity(transparency); // Apply transparency
+
+                    assembly->AddPart(tube_actor);
+
+                    previous_point = interpolated_point;
+                }
+
+                // for (int k = 0; k < 4; ++k) {
+                //     double angle = k * M_PI / 2.0;
+                //     Eigen::Vector3d offset(0.0, cos(angle) * 0.007, sin(angle) * 0.007);
+                //     Eigen::Vector3d start_offset_point = start_point + rotation_transpose * offset;
+                //     Eigen::Vector3d end_offset_point = end_point + next_rotation_transpose * offset;
+
+                //     vtkSmartPointer<vtkLineSource> line_source = vtkSmartPointer<vtkLineSource>::New();
+                //     line_source->SetPoint1(start_offset_point(0), start_offset_point(1), start_offset_point(2));
+                //     line_source->SetPoint2(end_offset_point(0), end_offset_point(1), end_offset_point(2));
+
+                //     vtkSmartPointer<vtkPolyDataMapper> line_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+                //     line_mapper->SetInputConnection(line_source->GetOutputPort());
+
+                //     vtkSmartPointer<vtkTubeFilter> tube_filter = vtkSmartPointer<vtkTubeFilter>::New();
+                //     tube_filter->SetInputConnection(line_source->GetOutputPort());
+                //     tube_filter->SetRadius(0.00015); // Set the radius of the tube
+                //     tube_filter->SetNumberOfSides(50); // Set the number of sides for the tube to make it smooth
+                //     tube_filter->Update();
+
+                //     vtkSmartPointer<vtkPolyDataMapper> tube_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+                //     tube_mapper->SetInputConnection(tube_filter->GetOutputPort());
+
+                //     vtkSmartPointer<vtkActor> tube_actor = vtkSmartPointer<vtkActor>::New();
+                //     tube_actor->SetMapper(tube_mapper);
+                //     tube_actor->GetProperty()->SetSpecular(0.0); // Set specular to zero to make it non-shiny
+                //     tube_actor->GetProperty()->SetDiffuse(0.8); // Increase diffuse to make it look more like a rope
+                //     tube_actor->GetProperty()->SetAmbient(0.2); // Set ambient to give it a softer look
+                //     tube_actor->GetProperty()->SetColor(0.5, 0.2, 0.1); // Darker brown color with more red for the rope
+                //     tube_actor->GetProperty()->SetOpacity(transparency); // Apply transparency
+
+                //     assembly->AddPart(tube_actor);
+                // }
+            }
         }
-        mp_backbone_points[n]->Modified();
     }
+    
+    mp_ren->AddActor(assembly);
 
     //Coupling Links and Joints
     for(unsigned int c = 0; c < m_topology.robot_coupling.size(); c++)
@@ -294,7 +447,21 @@ void Visualizer::InitScene()
 {
 
     //Background
+    //Background
     mp_ren->SetBackground(1.,1.,1.);
+
+    //Camera
+    mp_ren->GetActiveCamera()->SetPosition(0.2,0.3,0.5);
+    mp_ren->GetActiveCamera()->SetFocalPoint(0.1,0,0);
+    mp_ren->GetActiveCamera()->SetViewUp(1,0,0);
+
+        //plot one coordinate frame at the origin
+    vtkSmartPointer<vtkAxesActor> axes = vtkSmartPointer<vtkAxesActor>::New();
+    axes->SetTotalLength(0.025, 0.025, 0.025);
+    axes->SetShaftType(0);
+    axes->SetAxisLabels(0);
+    mp_ren->AddActor(axes);
+
 
     //Backbones
     for(unsigned int n = 0; n < m_topology.N; n++)

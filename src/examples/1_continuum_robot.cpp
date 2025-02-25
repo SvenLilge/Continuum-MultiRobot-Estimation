@@ -21,13 +21,13 @@ int main(int argc, char *argv[])
     // Number of robots
     topology.N = 1;
     // Number of total estimation nodes per robot (including the node at the root of each robot)
-    topology.K = std::vector<unsigned int>{21};
+    topology.K = std::vector<unsigned int>{11};
     // Number of interpolated states between estimation nodes per robot
     // M=1 results in no interpolation and the interpolation nodes will be equal to the estimation nodes
     // M=2 results in one additional interpolated node between each estimation node etc
-    topology.M = std::vector<unsigned int>{2};
+    topology.M = std::vector<unsigned int>{10};
     // Lengths of robots
-    topology.L = std::vector<double>{0.20};
+    topology.L = std::vector<double>{0.30};
     //Define if we lock the pose of the robots' ends
     topology.lock_first_pose = std::vector<bool>{true};
     topology.lock_last_pose = std::vector<bool>{false};
@@ -77,14 +77,15 @@ int main(int argc, char *argv[])
 
 
 
-    params.R_pose = 2e0*R_pose.asDiagonal();
-    params.R_strain = 10*R_strain.asDiagonal();
+    double factor = 5;
+    params.R_pose = factor*2e0*R_pose.asDiagonal();
+    params.R_strain = factor*10*R_strain.asDiagonal();
 
-    params.R_fbg_strain = 20e0*R_fbg_strain.asDiagonal();
+    params.R_fbg_strain = factor*20e0*R_fbg_strain.asDiagonal();
 
-    params.R_coupling = 1*1e-10*R_coupling.asDiagonal();
+    params.R_coupling = factor*1*1e-10*R_coupling.asDiagonal();
 
-    params.Qc = 4e0*Qc.asDiagonal();
+    params.Qc = factor*4e0*Qc.asDiagonal();
 
 
 
@@ -107,7 +108,7 @@ int main(int argc, char *argv[])
     std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements;
 
     //Strains
-    for(unsigned int i = 0; i < 11; i++)
+    for(unsigned int i = 0; i < 6; i++)
     {
         ContinuumRobotStateEstimator::SensorMeasurement meas;
         Eigen::Matrix<double,6,1> strain;;
@@ -122,7 +123,7 @@ int main(int argc, char *argv[])
         measurements.push_back(meas);
     }
 
-    for(unsigned int i = 11; i < 21; i++)
+    for(unsigned int i = 6; i < 11; i++)
     {
         ContinuumRobotStateEstimator::SensorMeasurement meas;
         Eigen::Matrix<double,6,1> strain;;
@@ -150,7 +151,7 @@ int main(int argc, char *argv[])
     Visualizer vis(topology);
 
     //Update the visualizer with the state
-    vis.update(state,true,true,3);
+    vis.update(state,false,true,3);
 
 
     //Create Window Interactor
