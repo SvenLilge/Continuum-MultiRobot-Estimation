@@ -14,6 +14,12 @@
 #include <vtkLine.h>
 #include <vtkLineSource.h>
 #include <vtkTransform.h>
+#include <vtkVertexGlyphFilter.h>
+#include <vtkDelaunay3D.h>
+#include <vtkDataSetSurfaceFilter.h>
+#include <vtkGeometryFilter.h>
+#include <vtkCleanPolyData.h>
+#include <vtkTriangleFilter.h>
 
 #include <utilities.h>
 /**
@@ -320,62 +326,102 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
     if(render_covariance)
     {
         Eigen::EigenSolver<Eigen::MatrixXd> solver;
-        int m_offset = 0;
+        vtkSmartPointer<vtkPoints> all_points = vtkSmartPointer<vtkPoints>::New();
         for(unsigned int n = 0; n < m_topology.N; n++)
         {
             for(unsigned int m = 0; m < state.robots[n].interpolation_nodes.size(); m++)
             {
-
                 Eigen::Vector3d pos = state.robots[n].interpolation_nodes[m].pose.block(0,3,3,1);
                 Eigen::Matrix3d cov = state.robots[n].interpolation_nodes[m].position_covariance;
                 solver.compute(cov);
+                if (solver.info() != Eigen::Success) {
+                    continue; // Skip this covariance if the solver fails
+                }
                 Eigen::MatrixXd eigen_vectors = solver.eigenvectors().real();
                 Eigen::VectorXd eigen_values = solver.eigenvalues().real();
-                eigen_values = n_std*eigen_values.cwiseSqrt();
+                if ((eigen_values.array() < 0).any()) {
+                    continue; // Skip this covariance if any eigenvalue is negative
+                }
+                eigen_values = n_std * eigen_values.cwiseSqrt();
 
                 Eigen::Matrix3d R = eigen_vectors;
                 Eigen::Vector3d s = eigen_values;
 
-
-                //Make sure that R resembles a rotation matrix
-                if((R.col(0).cross(R.col(1))).dot(R.col(2)) < 0)
+                // Make sure that R resembles a rotation matrix
+                if ((R.col(0).cross(R.col(1))).dot(R.col(2)) < 0)
                 {
                     R << eigen_vectors.col(1), eigen_vectors.col(0), eigen_vectors.col(2);
-                    s << eigen_values(1),
-                            eigen_values(0),
-                            eigen_values(2);
+                    s << eigen_values(1), eigen_values(0), eigen_values(2);
                 }
 
-                //Create sphere pose
-                Eigen::Matrix4d sphere_pose = Eigen::Matrix4d::Identity();
+                // Generate points on the ellipsoid surface
+                int num_points = 500; // Increase the number of points to generate on the ellipsoid surface
+                int num_latitude = static_cast<int>(std::sqrt(num_points));
+                int num_longitude = static_cast<int>(std::sqrt(num_points));
 
-                sphere_pose.block(0,0,3,3) = R;
-                sphere_pose.block(0,3,3,1) = pos;
-
-                //Check if one of the singular values is below a treshold (important to not scale the sphere's dimensions to zero)
-                for(int i = 0; i < s.size(); i++)
+                for (int i = 0; i <= num_latitude; ++i)
                 {
-                    if(s(i) < 1e-8)
-                        s(i) = 1e-8;
-                }
-
-
-                mp_ellipsoid_actors[m+m_offset]->SetVisibility(true);
-
-                vtkSmartPointer<vtkMatrix4x4> sphere_frame_vtk = vtkSmartPointer<vtkMatrix4x4>::New();
-                for(int i = 0; i < 4; i++)
-                {
-                    for(int j = 0; j < 4; j++)
+                    double phi = vtkMath::Pi() * i / num_latitude;
+                    for (int j = 0; j < num_longitude; ++j)
                     {
-                        sphere_frame_vtk->SetElement(i,j,sphere_pose(i,j));
+                        double theta = 2.0 * vtkMath::Pi() * j / num_longitude;
+                        double x = s(0) * sin(phi) * cos(theta);
+                        double y = s(1) * sin(phi) * sin(theta);
+                        double z = s(2) * cos(phi);
+
+                        Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
+                        all_points->InsertNextPoint(point(0), point(1), point(2));
                     }
                 }
-                mp_ellipsoid_actors[m+m_offset]->SetUserMatrix(sphere_frame_vtk);
-                mp_ellipsoid_actors[m+m_offset]->SetScale(s(0),s(1),s(2));
-
             }
-            m_offset = m_offset + state.robots[n].interpolation_nodes.size();
         }
+        vtkSmartPointer<vtkPolyData> polydata = vtkSmartPointer<vtkPolyData>::New();
+        polydata->SetPoints(all_points);
+
+        vtkSmartPointer<vtkVertexGlyphFilter> vertexFilter = vtkSmartPointer<vtkVertexGlyphFilter>::New();
+        vertexFilter->SetInputData(polydata);
+        vertexFilter->Update();
+
+        vtkSmartPointer<vtkCleanPolyData> cleanPolyData = vtkSmartPointer<vtkCleanPolyData>::New();
+        cleanPolyData->SetInputData(vertexFilter->GetOutput());
+        cleanPolyData->Update();
+
+        vtkSmartPointer<vtkDelaunay3D> delaunay = vtkSmartPointer<vtkDelaunay3D>::New();
+        delaunay->SetInputData(cleanPolyData->GetOutput());
+        delaunay->SetAlpha(0.02);
+        delaunay->SetTolerance(0.001);
+        delaunay->SetAlphaLines(false);
+        delaunay->SetAlphaVerts(false);
+        delaunay->SetOffset(0.001);
+        delaunay->SetBoundingTriangulation(false);
+        delaunay->Update();
+
+        vtkSmartPointer<vtkDataSetSurfaceFilter> surfaceFilter = vtkSmartPointer<vtkDataSetSurfaceFilter>::New();
+        surfaceFilter->SetInputConnection(delaunay->GetOutputPort());
+        surfaceFilter->Update();
+
+        vtkSmartPointer<vtkCleanPolyData> cleanSurface = vtkSmartPointer<vtkCleanPolyData>::New();
+        cleanSurface->SetInputConnection(surfaceFilter->GetOutputPort());
+        cleanSurface->Update();
+
+        vtkSmartPointer<vtkTriangleFilter> triangleFilter = vtkSmartPointer<vtkTriangleFilter>::New();
+        triangleFilter->SetInputConnection(cleanSurface->GetOutputPort());
+        triangleFilter->Update();
+
+        vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        mapper->SetInputConnection(triangleFilter->GetOutputPort());
+
+        vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
+        actor->SetMapper(mapper);
+        actor->GetProperty()->SetColor(0, 0, 1); // Blue color for the convex hull
+        actor->GetProperty()->SetOpacity(0.3); // Set transparency
+        // Enable backface culling to remove faces rendered inside the hull
+        actor->GetProperty()->BackfaceCullingOn();
+
+        // Enable frontface culling to remove faces rendered inside the hull
+        actor->GetProperty()->FrontfaceCullingOn();
+
+        mp_ren->AddActor(actor);
 
         if(m_topology.common_end_effector)
         {
