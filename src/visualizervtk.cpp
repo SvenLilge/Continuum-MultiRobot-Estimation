@@ -334,7 +334,66 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
 
     if(render_covariance)
     {
+
         Eigen::EigenSolver<Eigen::MatrixXd> solver;
+        
+        int m_offset = 0;
+        for(unsigned int n = 0; n < m_topology.N; n++)
+        {
+            for(unsigned int m = 0; m < state.robots[n].estimation_nodes.size(); m = m+2)
+            {
+
+                Eigen::Vector3d pos = state.robots[n].estimation_nodes[m].pose.block(0,3,3,1);
+                Eigen::Matrix3d cov = state.robots[n].estimation_nodes[m].position_covariance;
+                solver.compute(cov);
+                Eigen::MatrixXd eigen_vectors = solver.eigenvectors().real();
+                Eigen::VectorXd eigen_values = solver.eigenvalues().real();
+                eigen_values = n_std*eigen_values.cwiseSqrt();
+
+                Eigen::Matrix3d R = eigen_vectors;
+                Eigen::Vector3d s = eigen_values;
+
+
+                //Make sure that R resembles a rotation matrix
+                if((R.col(0).cross(R.col(1))).dot(R.col(2)) < 0)
+                {
+                    R << eigen_vectors.col(1), eigen_vectors.col(0), eigen_vectors.col(2);
+                    s << eigen_values(1),
+                            eigen_values(0),
+                            eigen_values(2);
+                }
+
+                //Create sphere pose
+                Eigen::Matrix4d sphere_pose = Eigen::Matrix4d::Identity();
+
+                sphere_pose.block(0,0,3,3) = R;
+                sphere_pose.block(0,3,3,1) = pos;
+
+                //Check if one of the singular values is below a treshold (important to not scale the sphere's dimensions to zero)
+                for(int i = 0; i < s.size(); i++)
+                {
+                    if(s(i) < 1e-8)
+                        s(i) = 1e-8;
+                }
+
+
+                mp_ellipsoid_actors[m+m_offset]->SetVisibility(true);
+
+                vtkSmartPointer<vtkMatrix4x4> sphere_frame_vtk = vtkSmartPointer<vtkMatrix4x4>::New();
+                for(int i = 0; i < 4; i++)
+                {
+                    for(int j = 0; j < 4; j++)
+                    {
+                        sphere_frame_vtk->SetElement(i,j,sphere_pose(i,j));
+                    }
+                }
+                mp_ellipsoid_actors[m+m_offset]->SetUserMatrix(sphere_frame_vtk);
+                mp_ellipsoid_actors[m+m_offset]->SetScale(s(0),s(1),s(2));
+
+            }
+            m_offset = m_offset + state.robots[n].estimation_nodes.size();
+        }
+        
         vtkSmartPointer<vtkPoints> all_points = vtkSmartPointer<vtkPoints>::New();
         for(unsigned int n = 0; n < m_topology.N; n++)
         {
@@ -389,7 +448,14 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                     int num_latitude = 20;
                     int num_longitude = num_points_per_circle;
 
-                    for (int i = num_latitude/2.0; i <= num_latitude; ++i)
+                    int step = 1;
+
+                    if(max_dot_sign < 0)
+                    {
+                        step = 1;
+                    }
+
+                    for (int i = step*num_latitude/2.0; i <= step*num_latitude; i = i + step)
                     {
                         double phi = vtkMath::Pi() * i / num_latitude;
                         std::vector<vtkIdType> ring_ids;
@@ -423,6 +489,9 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                             vtkIdType id = points->InsertNextPoint(point(0), point(1), point(2));
                             ring_ids.push_back(id);
                         }
+
+
+
                         for (int j = 0; j < num_longitude; ++j)
                         {
                             if (!previous_ring_ids.empty())
@@ -436,6 +505,7 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                                 polys->InsertNextCell(polygon);
                             }
                         }
+
                         previous_ring_ids = ring_ids;
                     }
                 }
@@ -544,8 +614,12 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
 
             vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
             actor->SetMapper(mapper);
-            actor->GetProperty()->SetColor(0, 0, 1); // Red color for the mesh
-            actor->GetProperty()->SetOpacity(0.3); // Set opacity
+            actor->GetProperty()->SetColor(0, 0, 1);
+            actor->GetProperty()->SetOpacity(0.1); // Increase opacity for better 3D effect
+            actor->GetProperty()->SetAmbient(0.2); // Adjust ambient lighting
+            actor->GetProperty()->SetDiffuse(0.7); // Increase diffuse lighting for better shading
+            actor->GetProperty()->SetSpecular(0.5); // Increase specular for shininess
+            actor->GetProperty()->SetSpecularPower(20); // Increase specular power for sharper highlights
 
             mp_ren->AddActor(actor);
         }
@@ -818,11 +892,12 @@ void Visualizer::InitScene()
 
         vtkSmartPointer<vtkActor> ellipsoid_actor_init = vtkSmartPointer<vtkActor>::New();
         ellipsoid_actor_init->SetMapper(ellipsoid_mapper);
-        ellipsoid_actor_init->GetProperty()->SetColor(0,0,1);
-        ellipsoid_actor_init->GetProperty()->SetOpacity(0.1);
-        ellipsoid_actor_init->GetProperty()->SetAmbient(0.3);
-        ellipsoid_actor_init->GetProperty()->SetDiffuse(0.5);
-        ellipsoid_actor_init->GetProperty()->SetSpecular(0.1);
+        ellipsoid_actor_init->GetProperty()->SetColor(0, 0, 1);
+        ellipsoid_actor_init->GetProperty()->SetOpacity(0.1); // Increase opacity for better 3D effect
+        ellipsoid_actor_init->GetProperty()->SetAmbient(0.2); // Adjust ambient lighting
+        ellipsoid_actor_init->GetProperty()->SetDiffuse(0.7); // Increase diffuse lighting for better shading
+        ellipsoid_actor_init->GetProperty()->SetSpecular(0.5); // Increase specular for shininess
+        ellipsoid_actor_init->GetProperty()->SetSpecularPower(20); // Increase specular power for sharper highlights
         ellipsoid_actor_init->SetVisibility(false);
 
         mp_ellipsoid_actors.push_back(ellipsoid_actor_init);
@@ -837,11 +912,12 @@ void Visualizer::InitScene()
 
                 vtkSmartPointer<vtkActor> ellipsoid_actor = vtkSmartPointer<vtkActor>::New();
                 ellipsoid_actor->SetMapper(ellipsoid_mapper);
-                ellipsoid_actor->GetProperty()->SetColor(0,0,1);
-                ellipsoid_actor->GetProperty()->SetOpacity(0.1);
-                ellipsoid_actor->GetProperty()->SetAmbient(0.3);
-                ellipsoid_actor->GetProperty()->SetDiffuse(0.5);
-                ellipsoid_actor->GetProperty()->SetSpecular(0.1);
+                ellipsoid_actor->GetProperty()->SetColor(0, 0, 1);
+                ellipsoid_actor->GetProperty()->SetOpacity(0.1); // Increase opacity for better 3D effect
+                ellipsoid_actor->GetProperty()->SetAmbient(0.2); // Adjust ambient lighting
+                ellipsoid_actor->GetProperty()->SetDiffuse(0.7); // Increase diffuse lighting for better shading
+                ellipsoid_actor->GetProperty()->SetSpecular(0.5); // Increase specular for shininess
+                ellipsoid_actor->GetProperty()->SetSpecularPower(20); // Increase specular power for sharper highlights
                 ellipsoid_actor->SetVisibility(false);
 
                 mp_ellipsoid_actors.push_back(ellipsoid_actor);

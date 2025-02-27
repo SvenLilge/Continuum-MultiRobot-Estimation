@@ -25,14 +25,14 @@ int main(int argc, char *argv[])
     // Number of interpolated states between estimation nodes per robot
     // M=1 results in no interpolation and the interpolation nodes will be equal to the estimation nodes
     // M=2 results in one additional interpolated node between each estimation node etc
-    topology.M = std::vector<unsigned int>{10};
+    topology.M = std::vector<unsigned int>{5};
     // Lengths of robots
     topology.L = std::vector<double>{0.30};
     //Define if we lock the pose of the robots' ends
     topology.lock_first_pose = std::vector<bool>{true};
     topology.lock_last_pose = std::vector<bool>{false};
     topology.lock_first_strain = std::vector<bool>{false};
-    topology.lock_last_strain = std::vector<bool>{false};
+    topology.lock_last_strain = std::vector<bool>{true};
 
     topology.fbg_core_distance = std::vector<double>{0};
     topology.fbg_theta_offset = std::vector<double>{0};
@@ -59,7 +59,7 @@ int main(int argc, char *argv[])
     ContinuumRobotStateEstimator::Hyperparameters params;
 
     Eigen::Matrix<double,6,1> R_pose;
-    R_pose << R_p*R_p, R_p*R_p, R_p*R_p, R_o*R_o, R_o*R_o, R_o*R_o;
+    R_pose << 0.8*R_p*R_p, R_p*R_p, R_p*R_p, R_o*R_o, R_o*R_o, R_o*R_o;
 
     Eigen::Matrix<double,6,1> R_strain;
     R_strain << R_v*R_v, R_v*R_v, R_v*R_v, R_u*R_u, R_u*R_u, R_u*R_u;
@@ -73,19 +73,19 @@ int main(int argc, char *argv[])
 
 
     Eigen::Matrix<double,6,1> Qc;
-    Qc << 1e-1, 1e-1, 1e-1, 1e0, 1e0, 1e0;
+    Qc << 1e-1, 1e-1, 1e-1, 1e2, 1e2, 1e2;
 
 
 
     double factor = 5;
-    params.R_pose = factor*2e0*R_pose.asDiagonal();
+    params.R_pose = factor*1e0*R_pose.asDiagonal();
     params.R_strain = factor*10*R_strain.asDiagonal();
 
     params.R_fbg_strain = factor*20e0*R_fbg_strain.asDiagonal();
 
     params.R_coupling = factor*1*1e-10*R_coupling.asDiagonal();
 
-    params.Qc = factor*4e0*Qc.asDiagonal();
+    params.Qc = factor*2e0*Qc.asDiagonal();
 
 
 
@@ -108,35 +108,17 @@ int main(int argc, char *argv[])
     std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements;
 
     //Strains
-    for(unsigned int i = 0; i < 6; i++)
-    {
-        ContinuumRobotStateEstimator::SensorMeasurement meas;
-        Eigen::Matrix<double,6,1> strain;;
+    ContinuumRobotStateEstimator::SensorMeasurement meas;
+    Eigen::Matrix<double,4,4> pose = Eigen::Matrix<double,4,4>::Identity();
+    pose.block(0,3,3,1) << 0.25, 0.1, 0.0;
 
-        strain << 1, 0, 0, 0, 10, 0;
 
-        meas.type = ContinuumRobotStateEstimator::SensorMeasurement::Strain;
-        meas.idx_robot = 0;
-        meas.idx_node = i;
-        meas.mask = Eigen::Matrix<int,6,1>(1,1,1,1,1,1);
-        meas.value = strain;
-        measurements.push_back(meas);
-    }
-
-    for(unsigned int i = 6; i < 11; i++)
-    {
-        ContinuumRobotStateEstimator::SensorMeasurement meas;
-        Eigen::Matrix<double,6,1> strain;;
-
-        strain << 1, 0, 0, 0, -10, 0;
-
-        meas.type = ContinuumRobotStateEstimator::SensorMeasurement::Strain;
-        meas.idx_robot = 0;
-        meas.idx_node = i;
-        meas.mask = Eigen::Matrix<int,6,1>(1,1,1,1,1,1);
-        meas.value = strain;
-        measurements.push_back(meas);
-    }
+    meas.type = ContinuumRobotStateEstimator::SensorMeasurement::Pose;
+    meas.idx_robot = 0;
+    meas.idx_node = 10;
+    meas.mask = Eigen::Matrix<int,6,1>(1,1,1,1,1,1);
+    meas.value = pose;
+    measurements.push_back(meas);
 
 
     //Run state estimator
