@@ -20,6 +20,15 @@
 #include <vtkGeometryFilter.h>
 #include <vtkCleanPolyData.h>
 #include <vtkTriangleFilter.h>
+#include <vtkSignedDistance.h>
+#include <vtkPCANormalEstimation.h>
+#include <vtkExtractSurface.h>
+#include <vtkPolyDataNormals.h>
+#include <vtkPolyDataMapper.h>
+#include <vtkPointData.h>
+#include <vtkPolygon.h>
+
+
 
 #include <utilities.h>
 /**
@@ -329,9 +338,14 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
         vtkSmartPointer<vtkPoints> all_points = vtkSmartPointer<vtkPoints>::New();
         for(unsigned int n = 0; n < m_topology.N; n++)
         {
-            for(unsigned int m = 0; m < state.robots[n].interpolation_nodes.size(); m++)
+            vtkSmartPointer<vtkPolyData> polyData = vtkSmartPointer<vtkPolyData>::New();
+            vtkSmartPointer<vtkPoints> points = vtkSmartPointer<vtkPoints>::New();
+            vtkSmartPointer<vtkCellArray> polys = vtkSmartPointer<vtkCellArray>::New();
+            std::vector<vtkIdType> previous_ring_ids;
+            for(unsigned int m = 0; m < state.robots[n].interpolation_nodes.size(); m = m+1)
             {
                 Eigen::Vector3d pos = state.robots[n].interpolation_nodes[m].pose.block(0,3,3,1);
+                Eigen::Matrix3d rot = state.robots[n].interpolation_nodes[m].pose.block(0,0,3,3);
                 Eigen::Matrix3d cov = state.robots[n].interpolation_nodes[m].position_covariance;
                 solver.compute(cov);
                 if (solver.info() != Eigen::Success) {
@@ -354,74 +368,187 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                     s << eigen_values(1), eigen_values(0), eigen_values(2);
                 }
 
-                // Generate points on the ellipsoid surface
-                int num_points = 500; // Increase the number of points to generate on the ellipsoid surface
-                int num_latitude = static_cast<int>(std::sqrt(num_points));
-                int num_longitude = static_cast<int>(std::sqrt(num_points));
-
-                for (int i = 0; i <= num_latitude; ++i)
-                {
-                    double phi = vtkMath::Pi() * i / num_latitude;
-                    for (int j = 0; j < num_longitude; ++j)
-                    {
-                        double theta = 2.0 * vtkMath::Pi() * j / num_longitude;
-                        double x = s(0) * sin(phi) * cos(theta);
-                        double y = s(1) * sin(phi) * sin(theta);
-                        double z = s(2) * cos(phi);
-
-                        Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
-                        all_points->InsertNextPoint(point(0), point(1), point(2));
+                // Identify the column of R that has the biggest angle to the first column of rot
+                int max_col = 0;
+                double max_dot = std::abs(R.col(0).dot(rot.col(0)));
+                double max_dot_sign = R.col(0).dot(rot.col(0));
+                for (int col = 1; col < 3; ++col) {
+                    double dot = std::abs(R.col(col).dot(rot.col(0)));
+                    if (dot > max_dot) {
+                        max_dot = dot;
+                        max_dot_sign = R.col(col).dot(rot.col(0));
+                        max_col = col;
                     }
                 }
+
+                int num_points_per_circle = 100; // Number of points per circle
+
+                if(m == state.robots[n].interpolation_nodes.size() - 1)
+                {
+                    // Sample points on the surface of the ellipsoid
+                    int num_latitude = 20;
+                    int num_longitude = num_points_per_circle;
+
+                    for (int i = num_latitude/2.0; i <= num_latitude; ++i)
+                    {
+                        double phi = vtkMath::Pi() * i / num_latitude;
+                        std::vector<vtkIdType> ring_ids;
+                        for (int j = 0; j < num_longitude; ++j)
+                        {
+                            double theta = 2.0 * vtkMath::Pi() * j / num_longitude;
+
+                            Eigen::Vector3d point;
+                            if(max_col == 2)
+                            {
+                                double x = s(0) * sin(phi) * cos(theta);
+                                double y = s(1) * sin(phi) * sin(theta);
+                                double z = s(2) * cos(phi);
+                                point = R * Eigen::Vector3d(x, y, z) + pos;
+                            }
+                            else if(max_col == 1)
+                            {
+                                double x = s(0) * sin(phi) * cos(theta);
+                                double y = s(1) * cos(phi);
+                                double z = s(2) * sin(phi) * sin(theta);
+                                point = R * Eigen::Vector3d(x, y, z) + pos;
+                            }
+                            else if(max_col == 0)
+                            {
+                                double x = s(0) * cos(phi);
+                                double y = s(1) * sin(phi) * cos(theta);
+                                double z = s(2) * sin(phi) * sin(theta);
+                                point = R * Eigen::Vector3d(x, y, z) + pos;
+                            }
+
+                            vtkIdType id = points->InsertNextPoint(point(0), point(1), point(2));
+                            ring_ids.push_back(id);
+                        }
+                        for (int j = 0; j < num_longitude; ++j)
+                        {
+                            if (!previous_ring_ids.empty())
+                            {
+                                vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
+                                polygon->GetPointIds()->SetNumberOfIds(4);
+                                polygon->GetPointIds()->SetId(0, previous_ring_ids[j]);
+                                polygon->GetPointIds()->SetId(1, previous_ring_ids[(j + 1) % num_longitude]);
+                                polygon->GetPointIds()->SetId(2, ring_ids[(j + 1) % num_longitude]);
+                                polygon->GetPointIds()->SetId(3, ring_ids[j]);
+                                polys->InsertNextCell(polygon);
+                            }
+                        }
+                        previous_ring_ids = ring_ids;
+                    }
+                }
+                else
+                {
+                    // Sample points along the three main circles/ellipses composing the ellipsoid
+                    std::vector<vtkIdType> ring_ids;
+
+                    // Circle in the XY plane
+                    if(max_col == 2)
+                    {
+                        for (int i = 0; i < num_points_per_circle; ++i)
+                        {
+                            double theta = 2.0 * vtkMath::Pi() * i / num_points_per_circle;
+                            double x = s(0) * cos(theta);
+                            double y = s(1) * sin(theta);
+                            double z = 0.0;
+
+                            Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
+                            vtkIdType id = points->InsertNextPoint(point(0), point(1), point(2));
+                            ring_ids.push_back(id);
+                        }
+                        for (int i = 0; i < num_points_per_circle; ++i)
+                        {
+                            if (!previous_ring_ids.empty())
+                            {
+                                vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
+                                polygon->GetPointIds()->SetNumberOfIds(4);
+                                polygon->GetPointIds()->SetId(0, previous_ring_ids[i]);
+                                polygon->GetPointIds()->SetId(1, previous_ring_ids[(i + 1) % num_points_per_circle]);
+                                polygon->GetPointIds()->SetId(2, ring_ids[(i + 1) % num_points_per_circle]);
+                                polygon->GetPointIds()->SetId(3, ring_ids[i]);
+                                polys->InsertNextCell(polygon);
+                            }
+                        }
+                    }
+
+                    // Circle in the XZ plane
+                    if(max_col == 1)
+                    {
+                        for (int i = 0; i < num_points_per_circle; ++i)
+                        {
+                            double theta = 2.0 * vtkMath::Pi() * i / num_points_per_circle;
+                            double x = s(0) * cos(theta);
+                            double y = 0.0;
+                            double z = s(2) * sin(theta);
+
+                            Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
+                            vtkIdType id = points->InsertNextPoint(point(0), point(1), point(2));
+                            ring_ids.push_back(id);
+                        }
+
+                        for (int i = 0; i < num_points_per_circle; ++i)
+                        {
+                            if (!previous_ring_ids.empty())
+                            {
+                                vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
+                                polygon->GetPointIds()->SetNumberOfIds(4);
+                                polygon->GetPointIds()->SetId(0, previous_ring_ids[i]);
+                                polygon->GetPointIds()->SetId(1, previous_ring_ids[(i + 1) % num_points_per_circle]);
+                                polygon->GetPointIds()->SetId(2, ring_ids[(i + 1) % num_points_per_circle]);
+                                polygon->GetPointIds()->SetId(3, ring_ids[i]);
+                                polys->InsertNextCell(polygon);
+                            }
+                        }
+                    }
+
+                    // Circle in the YZ plane
+                    if(max_col == 0)
+                    {
+                        for (int i = 0; i < num_points_per_circle; ++i)
+                        {
+                            double theta = 2.0 * vtkMath::Pi() * i / num_points_per_circle;
+                            double x = 0.0;
+                            double y = s(1) * cos(theta);
+                            double z = s(2) * sin(theta);
+
+                            Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
+                            vtkIdType id = points->InsertNextPoint(point(0), point(1), point(2));
+                            ring_ids.push_back(id);
+                        }
+                        for (int i = 0; i < num_points_per_circle; ++i)
+                        {
+                            if (!previous_ring_ids.empty())
+                            {
+                                vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
+                                polygon->GetPointIds()->SetNumberOfIds(4);
+                                polygon->GetPointIds()->SetId(0, previous_ring_ids[i]);
+                                polygon->GetPointIds()->SetId(1, previous_ring_ids[(i + 1) % num_points_per_circle]);
+                                polygon->GetPointIds()->SetId(2, ring_ids[(i + 1) % num_points_per_circle]);
+                                polygon->GetPointIds()->SetId(3, ring_ids[i]);
+                                polys->InsertNextCell(polygon);
+                            }
+                        }
+                    }
+
+                    previous_ring_ids = ring_ids;
+                }
             }
+
+            polyData->SetPoints(points);
+            polyData->SetPolys(polys);
+
+            vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+            mapper->SetInputData(polyData);
+
+            vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
+            actor->SetMapper(mapper);
+            actor->GetProperty()->SetColor(0, 0, 1); // Red color for the mesh
+            actor->GetProperty()->SetOpacity(0.3); // Set opacity
+
+            mp_ren->AddActor(actor);
         }
-        vtkSmartPointer<vtkPolyData> polydata = vtkSmartPointer<vtkPolyData>::New();
-        polydata->SetPoints(all_points);
-
-        vtkSmartPointer<vtkVertexGlyphFilter> vertexFilter = vtkSmartPointer<vtkVertexGlyphFilter>::New();
-        vertexFilter->SetInputData(polydata);
-        vertexFilter->Update();
-
-        vtkSmartPointer<vtkCleanPolyData> cleanPolyData = vtkSmartPointer<vtkCleanPolyData>::New();
-        cleanPolyData->SetInputData(vertexFilter->GetOutput());
-        cleanPolyData->Update();
-
-        vtkSmartPointer<vtkDelaunay3D> delaunay = vtkSmartPointer<vtkDelaunay3D>::New();
-        delaunay->SetInputData(cleanPolyData->GetOutput());
-        delaunay->SetAlpha(0.02);
-        delaunay->SetTolerance(0.001);
-        delaunay->SetAlphaLines(false);
-        delaunay->SetAlphaVerts(false);
-        delaunay->SetOffset(0.001);
-        delaunay->SetBoundingTriangulation(false);
-        delaunay->Update();
-
-        vtkSmartPointer<vtkDataSetSurfaceFilter> surfaceFilter = vtkSmartPointer<vtkDataSetSurfaceFilter>::New();
-        surfaceFilter->SetInputConnection(delaunay->GetOutputPort());
-        surfaceFilter->Update();
-
-        vtkSmartPointer<vtkCleanPolyData> cleanSurface = vtkSmartPointer<vtkCleanPolyData>::New();
-        cleanSurface->SetInputConnection(surfaceFilter->GetOutputPort());
-        cleanSurface->Update();
-
-        vtkSmartPointer<vtkTriangleFilter> triangleFilter = vtkSmartPointer<vtkTriangleFilter>::New();
-        triangleFilter->SetInputConnection(cleanSurface->GetOutputPort());
-        triangleFilter->Update();
-
-        vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-        mapper->SetInputConnection(triangleFilter->GetOutputPort());
-
-        vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
-        actor->SetMapper(mapper);
-        actor->GetProperty()->SetColor(0, 0, 1); // Blue color for the convex hull
-        actor->GetProperty()->SetOpacity(0.3); // Set transparency
-        // Enable backface culling to remove faces rendered inside the hull
-        actor->GetProperty()->BackfaceCullingOn();
-
-        // Enable frontface culling to remove faces rendered inside the hull
-        actor->GetProperty()->FrontfaceCullingOn();
-
-        mp_ren->AddActor(actor);
 
         if(m_topology.common_end_effector)
         {

@@ -7,7 +7,7 @@ project(continuum-multirobot-estimation)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 #VTK
-find_package(VTK REQUIRED)
+find_package(VTK 9.4 REQUIRED)
 
 #Eigen
 find_package (Eigen3 3.3 REQUIRED NO_MODULE)
