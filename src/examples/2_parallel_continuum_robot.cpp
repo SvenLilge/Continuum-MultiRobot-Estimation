@@ -21,13 +21,13 @@ int main(int argc, char *argv[])
     // Number of robots
     topology.N = 2;
     // Number of total estimation nodes per robot (including the node at the root of each robot)
-    topology.K = std::vector<unsigned int>{21,21};
+    topology.K = std::vector<unsigned int>{11,11};
     // Number of interpolated states between estimation nodes per robot
     // M=1 results in no interpolation and the interpolation nodes will be equal to the estimation nodes
     // M=2 results in one additional interpolated node between each estimation node etc
-    topology.M = std::vector<unsigned int>{2,2};
+    topology.M = std::vector<unsigned int>{10,10};
     // Lengths of robots
-    topology.L = std::vector<double>{0.20,0.20};
+    topology.L = std::vector<double>{0.3,0.3};
     //Define if we lock the pose of the robots' ends
     topology.lock_first_pose = std::vector<bool>{true,true};
     topology.lock_last_pose = std::vector<bool>{false,false};
@@ -43,49 +43,38 @@ int main(int argc, char *argv[])
     Eigen::Matrix4d T1 = Eigen::Matrix4d::Identity();
 
 
-    T1.block(0,3,3,1) << 0,0.05,0;
+    T1.block(0,3,3,1) << 0,0,0;
 
     topology.Ti0.push_back(T1);
 
 
-
     Eigen::Matrix4d T2 = Eigen::Matrix4d::Identity();
-
-    T2.block(0,3,3,1) << 0,-0.05,0;
+    T2.block(0,0,3,3) << std::cos(3.1415/2.0), -std::sin(3.1415/2.0), 0,
+                                       std::sin(3.1415/2.0), std::cos(3.1415/2.0), 0,
+                                       0, 0, 1;
+    T2.block(0,3,3,1) << 0.15,-0.25,0;
 
     topology.Ti0.push_back(T2);
 
 
     //Define coupling
 
-    topology.common_end_effector = true;
+    topology.common_end_effector = false;
 
     topology.robot_coupling.clear();
 
     ContinuumRobotStateEstimator::RobotTopology::Coupling coupling;
-    coupling.idxA = 0;
-    coupling.idxB = 2;
-    coupling.coupling_node_robot_A = (topology.K.at(0)-1); //not needed for EE
-    coupling.coupling_node_robot_B = 0; //not needed for EE
+    coupling.idxA = 1;
+    coupling.idxB = 0;
+    coupling.coupling_node_robot_A = (topology.K.at(1)-1);
+    coupling.coupling_node_robot_B = (topology.K.at(0)-1)/2.0 + 1; //not needed for EE
     coupling.T_bA_c = Eigen::Matrix4d::Identity();
     coupling.T_bB_c = Eigen::Matrix4d::Identity();
-    coupling.T_bB_c.block(0,3,3,1) << 0,0.05,0;
+    coupling.T_bB_c.block(0,0,3,3) << std::cos(3.1415/2.0), -std::sin(3.1415/2.0), 0,
+                                       std::sin(3.1415/2.0), std::cos(3.1415/2.0), 0,
+                                       0, 0, 1;
 
     Eigen::Matrix<int,6,1> mask_coupling;
-    mask_coupling << 1,1,1,1,1,1; // first three are position, last three orientation
-    coupling.mask = mask_coupling;
-
-    topology.robot_coupling.push_back(coupling);
-
-
-    coupling.idxA = 1;
-    coupling.idxB = 2;
-    coupling.coupling_node_robot_A = (topology.K.at(1)-1); //not needed for EE
-    coupling.coupling_node_robot_B = 0; //not needed for EE
-    coupling.T_bA_c = Eigen::Matrix4d::Identity();
-    coupling.T_bB_c = Eigen::Matrix4d::Identity();
-    coupling.T_bB_c.block(0,3,3,1) << 0,-0.05,0;
-
     mask_coupling << 1,1,1,1,1,1; // first three are position, last three orientation
     coupling.mask = mask_coupling;
 
@@ -104,7 +93,7 @@ int main(int argc, char *argv[])
     ContinuumRobotStateEstimator::Hyperparameters params;
 
     Eigen::Matrix<double,6,1> R_pose;
-    R_pose << R_p*R_p, R_p*R_p, R_p*R_p, R_o*R_o, R_o*R_o, R_o*R_o;
+    R_pose << R_p*R_p, R_p*R_p, 0.8*R_p*R_p, R_o*R_o, R_o*R_o, R_o*R_o;
 
     Eigen::Matrix<double,6,1> R_strain;
     R_strain << R_v*R_v, R_v*R_v, R_v*R_v, R_u*R_u, R_u*R_u, R_u*R_u;
@@ -116,20 +105,20 @@ int main(int argc, char *argv[])
     Eigen::Matrix<double,6,1> R_coupling;
     R_coupling << 1, 1, 1, 1, 1, 1;
 
-
     Eigen::Matrix<double,6,1> Qc;
-    Qc << 1e0, 1e0, 1e0, 1e0, 1e0, 1e0;
+    Qc << 1e-1, 1e-1, 1e-1, 1e2, 1e2, 1e2;
 
 
 
-    params.R_pose = 2e0*R_pose.asDiagonal();
-    params.R_strain = 10*R_strain.asDiagonal();
+    double factor = 5;
+    params.R_pose = factor*1e0*R_pose.asDiagonal();
+    params.R_strain = factor*10*R_strain.asDiagonal();
 
-    params.R_fbg_strain = 20e0*R_fbg_strain.asDiagonal();
+    params.R_fbg_strain = factor*20e0*R_fbg_strain.asDiagonal();
 
-    params.R_coupling = 1*1e-10*R_coupling.asDiagonal();
+    params.R_coupling = factor*1*1e-10*R_coupling.asDiagonal();
 
-    params.Qc = 4e0*Qc.asDiagonal();
+    params.Qc = factor*2e0*Qc.asDiagonal();
 
 
 
@@ -151,16 +140,19 @@ int main(int argc, char *argv[])
     //Define measurements
     std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements;
 
-    //Pose
-    ContinuumRobotStateEstimator::SensorMeasurement meas;
-    Eigen::Matrix4d pose = Eigen::Matrix4d::Identity();
 
-    pose.block(0,3,3,1) << 0.1273, 0, 0.1273;
+    ContinuumRobotStateEstimator::SensorMeasurement meas;
+    Eigen::Matrix<double,4,4> pose = Eigen::Matrix<double,4,4>::Identity();
+    //pose.block(0,0,3,3) << std::cos(-3.1415/2.0), -std::sin(-3.1415/2.0), 0,
+    //                                   std::sin(-3.1415/2.0), std::cos(-3.1415/2.0), 0,
+    //                                   0, 0, 1;
+    pose.block(0,3,3,1) << 0.25, 0.1, 0.0;
+
 
     meas.type = ContinuumRobotStateEstimator::SensorMeasurement::Pose;
-    meas.idx_robot = 2;
-    meas.idx_node = 0;
-    meas.mask = Eigen::Matrix<int,6,1>(1,1,1,0,0,0);
+    meas.idx_robot = 0;
+    meas.idx_node = 10;
+    meas.mask = Eigen::Matrix<int,6,1>(1,1,1,1,1,1);
     meas.value = pose;
     measurements.push_back(meas);
 
@@ -176,7 +168,7 @@ int main(int argc, char *argv[])
     Visualizer vis(topology);
 
     //Update the visualizer with the state
-    vis.update(state,true,true,3);
+    vis.update(state,false,true,3);
 
 
     //Create Window Interactor

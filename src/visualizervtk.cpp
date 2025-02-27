@@ -449,13 +449,15 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                     int num_longitude = num_points_per_circle;
 
                     int step = 1;
+                    int goal = num_latitude;
 
-                    if(max_dot_sign < 0)
-                    {
-                        step = 1;
-                    }
+                    //if(max_dot_sign < 0)
+                    //{
+                    //    step = -1;
+                    //    goal = 0;
+                    //}
 
-                    for (int i = step*num_latitude/2.0; i <= step*num_latitude; i = i + step)
+                    for (int i = num_latitude/2.0; i <= goal; i = i + step)
                     {
                         double phi = vtkMath::Pi() * i / num_latitude;
                         std::vector<vtkIdType> ring_ids;
@@ -491,13 +493,13 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                         }
 
 
-
                         for (int j = 0; j < num_longitude; ++j)
                         {
                             if (!previous_ring_ids.empty())
                             {
                                 vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
                                 polygon->GetPointIds()->SetNumberOfIds(4);
+
                                 polygon->GetPointIds()->SetId(0, previous_ring_ids[j]);
                                 polygon->GetPointIds()->SetId(1, previous_ring_ids[(j + 1) % num_longitude]);
                                 polygon->GetPointIds()->SetId(2, ring_ids[(j + 1) % num_longitude]);
@@ -514,32 +516,26 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                     // Sample points along the three main circles/ellipses composing the ellipsoid
                     std::vector<vtkIdType> ring_ids;
 
+                    int sign = 1;
+                    if (max_dot_sign < 0) {
+                        sign = -1;
+                        }
+
                     // Circle in the XY plane
                     if(max_col == 2)
                     {
+                        
+
                         for (int i = 0; i < num_points_per_circle; ++i)
                         {
                             double theta = 2.0 * vtkMath::Pi() * i / num_points_per_circle;
-                            double x = s(0) * cos(theta);
-                            double y = s(1) * sin(theta);
+                            double x = sign*s(0) * cos(theta);
+                            double y = sign*s(1) * sin(theta);
                             double z = 0.0;
 
                             Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
                             vtkIdType id = points->InsertNextPoint(point(0), point(1), point(2));
                             ring_ids.push_back(id);
-                        }
-                        for (int i = 0; i < num_points_per_circle; ++i)
-                        {
-                            if (!previous_ring_ids.empty())
-                            {
-                                vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
-                                polygon->GetPointIds()->SetNumberOfIds(4);
-                                polygon->GetPointIds()->SetId(0, previous_ring_ids[i]);
-                                polygon->GetPointIds()->SetId(1, previous_ring_ids[(i + 1) % num_points_per_circle]);
-                                polygon->GetPointIds()->SetId(2, ring_ids[(i + 1) % num_points_per_circle]);
-                                polygon->GetPointIds()->SetId(3, ring_ids[i]);
-                                polys->InsertNextCell(polygon);
-                            }
                         }
                     }
 
@@ -549,27 +545,13 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                         for (int i = 0; i < num_points_per_circle; ++i)
                         {
                             double theta = 2.0 * vtkMath::Pi() * i / num_points_per_circle;
-                            double x = s(0) * cos(theta);
+                            double x = sign*s(0) * sin(theta);
                             double y = 0.0;
-                            double z = s(2) * sin(theta);
+                            double z = sign*s(2) * cos(theta);
 
                             Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
                             vtkIdType id = points->InsertNextPoint(point(0), point(1), point(2));
                             ring_ids.push_back(id);
-                        }
-
-                        for (int i = 0; i < num_points_per_circle; ++i)
-                        {
-                            if (!previous_ring_ids.empty())
-                            {
-                                vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
-                                polygon->GetPointIds()->SetNumberOfIds(4);
-                                polygon->GetPointIds()->SetId(0, previous_ring_ids[i]);
-                                polygon->GetPointIds()->SetId(1, previous_ring_ids[(i + 1) % num_points_per_circle]);
-                                polygon->GetPointIds()->SetId(2, ring_ids[(i + 1) % num_points_per_circle]);
-                                polygon->GetPointIds()->SetId(3, ring_ids[i]);
-                                polys->InsertNextCell(polygon);
-                            }
                         }
                     }
 
@@ -580,25 +562,26 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                         {
                             double theta = 2.0 * vtkMath::Pi() * i / num_points_per_circle;
                             double x = 0.0;
-                            double y = s(1) * cos(theta);
-                            double z = s(2) * sin(theta);
+                            double y = sign*s(1) * cos(theta);
+                            double z = sign*s(2) * sin(theta);
 
                             Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
                             vtkIdType id = points->InsertNextPoint(point(0), point(1), point(2));
                             ring_ids.push_back(id);
                         }
-                        for (int i = 0; i < num_points_per_circle; ++i)
+                    }
+
+                    for (int i = 0; i < num_points_per_circle; ++i)
+                    {
+                        if (!previous_ring_ids.empty())
                         {
-                            if (!previous_ring_ids.empty())
-                            {
-                                vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
-                                polygon->GetPointIds()->SetNumberOfIds(4);
-                                polygon->GetPointIds()->SetId(0, previous_ring_ids[i]);
-                                polygon->GetPointIds()->SetId(1, previous_ring_ids[(i + 1) % num_points_per_circle]);
-                                polygon->GetPointIds()->SetId(2, ring_ids[(i + 1) % num_points_per_circle]);
-                                polygon->GetPointIds()->SetId(3, ring_ids[i]);
-                                polys->InsertNextCell(polygon);
-                            }
+                            vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
+                            polygon->GetPointIds()->SetNumberOfIds(4);
+                            polygon->GetPointIds()->SetId(0, previous_ring_ids[i]);
+                            polygon->GetPointIds()->SetId(1, previous_ring_ids[(i + 1) % num_points_per_circle]);
+                            polygon->GetPointIds()->SetId(2, ring_ids[(i + 1) % num_points_per_circle]);
+                            polygon->GetPointIds()->SetId(3, ring_ids[i]);
+                            polys->InsertNextCell(polygon);
                         }
                     }
 

@@ -107,7 +107,6 @@ int main(int argc, char *argv[])
     //Define measurements
     std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements;
 
-    //Strains
     ContinuumRobotStateEstimator::SensorMeasurement meas;
     Eigen::Matrix<double,4,4> pose = Eigen::Matrix<double,4,4>::Identity();
     pose.block(0,3,3,1) << 0.25, 0.1, 0.0;
