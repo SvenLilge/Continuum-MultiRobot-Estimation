@@ -25,7 +25,7 @@ int main(int argc, char *argv[])
     // Number of interpolated states between estimation nodes per robot
     // M=1 results in no interpolation and the interpolation nodes will be equal to the estimation nodes
     // M=2 results in one additional interpolated node between each estimation node etc
-    topology.M = std::vector<unsigned int>{10,10};
+    topology.M = std::vector<unsigned int>{5,5};
     // Lengths of robots
     topology.L = std::vector<double>{0.3,0.3};
     //Define if we lock the pose of the robots' ends
@@ -168,7 +168,7 @@ int main(int argc, char *argv[])
     Visualizer vis(topology);
 
     //Update the visualizer with the state
-    vis.update(state,false,true,3);
+    vis.update(state,true,true,3);
 
 
     //Create Window Interactor

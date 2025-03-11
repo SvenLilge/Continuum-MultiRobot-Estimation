@@ -288,7 +288,7 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
         int k_offset = 0;
         for(unsigned int n = 0; n < m_topology.N; n++)
         {
-            for(unsigned int k = 0; k < m_topology.K[n]; k++)
+            for(unsigned int k = 0; k < 1; k++)
             {
                 Eigen::Matrix4d axes_pose = state.robots[n].estimation_nodes[k].pose;
 
@@ -340,11 +340,11 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
         int m_offset = 0;
         for(unsigned int n = 0; n < m_topology.N; n++)
         {
-            for(unsigned int m = 0; m < state.robots[n].estimation_nodes.size(); m = m+2)
+            for(unsigned int m = 0; m < state.robots[n].interpolation_nodes.size(); m = m+1)
             {
 
-                Eigen::Vector3d pos = state.robots[n].estimation_nodes[m].pose.block(0,3,3,1);
-                Eigen::Matrix3d cov = state.robots[n].estimation_nodes[m].position_covariance;
+                Eigen::Vector3d pos = state.robots[n].interpolation_nodes[m].pose.block(0,3,3,1);
+                Eigen::Matrix3d cov = state.robots[n].interpolation_nodes[m].position_covariance;
                 solver.compute(cov);
                 Eigen::MatrixXd eigen_vectors = solver.eigenvectors().real();
                 Eigen::VectorXd eigen_values = solver.eigenvalues().real();
@@ -391,7 +391,7 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                 mp_ellipsoid_actors[m+m_offset]->SetScale(s(0),s(1),s(2));
 
             }
-            m_offset = m_offset + state.robots[n].estimation_nodes.size();
+            m_offset = m_offset + state.robots[n].interpolation_nodes.size();
         }
         
         vtkSmartPointer<vtkPoints> all_points = vtkSmartPointer<vtkPoints>::New();
@@ -407,14 +407,14 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                 Eigen::Matrix3d rot = state.robots[n].interpolation_nodes[m].pose.block(0,0,3,3);
                 Eigen::Matrix3d cov = state.robots[n].interpolation_nodes[m].position_covariance;
                 solver.compute(cov);
-                if (solver.info() != Eigen::Success) {
-                    continue; // Skip this covariance if the solver fails
-                }
+                //if (solver.info() != Eigen::Success) {
+                //    continue; // Skip this covariance if the solver fails
+                //}
                 Eigen::MatrixXd eigen_vectors = solver.eigenvectors().real();
                 Eigen::VectorXd eigen_values = solver.eigenvalues().real();
-                if ((eigen_values.array() < 0).any()) {
-                    continue; // Skip this covariance if any eigenvalue is negative
-                }
+                //if ((eigen_values.array() < 0).any()) {
+                //    continue; // Skip this covariance if any eigenvalue is negative
+                //}
                 eigen_values = n_std * eigen_values.cwiseSqrt();
 
                 Eigen::Matrix3d R = eigen_vectors;
@@ -423,22 +423,38 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                 // Make sure that R resembles a rotation matrix
                 if ((R.col(0).cross(R.col(1))).dot(R.col(2)) < 0)
                 {
-                    R << eigen_vectors.col(1), eigen_vectors.col(0), eigen_vectors.col(2);
-                    s << eigen_values(1), eigen_values(0), eigen_values(2);
+                    R << eigen_vectors.col(0), eigen_vectors.col(2), eigen_vectors.col(1);
+                    s << eigen_values(0), eigen_values(2), eigen_values(1);
                 }
 
                 // Identify the column of R that has the biggest angle to the first column of rot
+                //int max_col = 0;
+                //double max_dot = std::abs(R.col(0).dot(rot.col(0)));
+                //double max_dot_sign = R.col(0).dot(rot.col(0));
+                //for (int col = 1; col < 3; ++col) {
+                //    double dot = std::abs(R.col(col).dot(rot.col(0)));
+                //    if (dot > max_dot) {
+                //        max_dot = dot;
+                //        max_dot_sign = R.col(col).dot(rot.col(0));
+                //        max_col = col;
+                //    }
+                //}
+
                 int max_col = 0;
-                double max_dot = std::abs(R.col(0).dot(rot.col(0)));
-                double max_dot_sign = R.col(0).dot(rot.col(0));
+                double max_dot = std::abs(s(0));
+                double max_dot_sign = s(0);
                 for (int col = 1; col < 3; ++col) {
-                    double dot = std::abs(R.col(col).dot(rot.col(0)));
-                    if (dot > max_dot) {
+                    double dot = std::abs(s(col));
+                    if (dot < max_dot) {
                         max_dot = dot;
-                        max_dot_sign = R.col(col).dot(rot.col(0));
+                        max_dot_sign = s(col);
                         max_col = col;
                     }
                 }
+
+
+                //if(max_dot_sign < 0)
+                //    R = -1*R;
 
                 int num_points_per_circle = 100; // Number of points per circle
 
@@ -457,7 +473,7 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                     //    goal = 0;
                     //}
 
-                    for (int i = num_latitude/2.0; i <= goal; i = i + step)
+                    for (int i = 0; i <= goal; i = i + step)
                     {
                         double phi = vtkMath::Pi() * i / num_latitude;
                         std::vector<vtkIdType> ring_ids;
@@ -475,9 +491,9 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                             }
                             else if(max_col == 1)
                             {
-                                double x = s(0) * sin(phi) * cos(theta);
+                                double x = s(0) * sin(phi) * sin(theta);
                                 double y = s(1) * cos(phi);
-                                double z = s(2) * sin(phi) * sin(theta);
+                                double z = s(2) * sin(phi) * cos(theta);
                                 point = R * Eigen::Vector3d(x, y, z) + pos;
                             }
                             else if(max_col == 0)
@@ -493,22 +509,22 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                         }
 
 
-                        for (int j = 0; j < num_longitude; ++j)
-                        {
-                            if (!previous_ring_ids.empty())
-                            {
-                                vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
-                                polygon->GetPointIds()->SetNumberOfIds(4);
-
-                                polygon->GetPointIds()->SetId(0, previous_ring_ids[j]);
-                                polygon->GetPointIds()->SetId(1, previous_ring_ids[(j + 1) % num_longitude]);
-                                polygon->GetPointIds()->SetId(2, ring_ids[(j + 1) % num_longitude]);
-                                polygon->GetPointIds()->SetId(3, ring_ids[j]);
-                                polys->InsertNextCell(polygon);
-                            }
-                        }
-
-                        previous_ring_ids = ring_ids;
+                        //for (int j = 0; j < num_longitude; ++j)
+                        //{
+                        //    if (!previous_ring_ids.empty())
+                        //    {
+                        //        vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
+                        //        polygon->GetPointIds()->SetNumberOfIds(4);
+//
+                        //        polygon->GetPointIds()->SetId(0, previous_ring_ids[j]);
+                        //        polygon->GetPointIds()->SetId(1, previous_ring_ids[(j + 1) % num_longitude]);
+                        //        polygon->GetPointIds()->SetId(2, ring_ids[(j + 1) % num_longitude]);
+                        //        polygon->GetPointIds()->SetId(3, ring_ids[j]);
+                        //        polys->InsertNextCell(polygon);
+                        //    }
+                        //}
+//
+                        //previous_ring_ids = ring_ids;
                     }
                 }
                 else
@@ -516,21 +532,17 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                     // Sample points along the three main circles/ellipses composing the ellipsoid
                     std::vector<vtkIdType> ring_ids;
 
-                    int sign = 1;
-                    if (max_dot_sign < 0) {
-                        sign = -1;
-                        }
 
                     // Circle in the XY plane
-                    if(max_col == 2)
+                    if(true)
                     {
                         
 
                         for (int i = 0; i < num_points_per_circle; ++i)
                         {
                             double theta = 2.0 * vtkMath::Pi() * i / num_points_per_circle;
-                            double x = sign*s(0) * cos(theta);
-                            double y = sign*s(1) * sin(theta);
+                            double x = s(0) * cos(theta);
+                            double y = s(1) * sin(theta);
                             double z = 0.0;
 
                             Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
@@ -540,14 +552,14 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                     }
 
                     // Circle in the XZ plane
-                    if(max_col == 1)
+                    if(true)
                     {
                         for (int i = 0; i < num_points_per_circle; ++i)
                         {
                             double theta = 2.0 * vtkMath::Pi() * i / num_points_per_circle;
-                            double x = sign*s(0) * sin(theta);
+                            double x = s(0) * sin(theta);
                             double y = 0.0;
-                            double z = sign*s(2) * cos(theta);
+                            double z = s(2) * cos(theta);
 
                             Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
                             vtkIdType id = points->InsertNextPoint(point(0), point(1), point(2));
@@ -556,14 +568,14 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                     }
 
                     // Circle in the YZ plane
-                    if(max_col == 0)
+                    if(true)
                     {
                         for (int i = 0; i < num_points_per_circle; ++i)
                         {
                             double theta = 2.0 * vtkMath::Pi() * i / num_points_per_circle;
                             double x = 0.0;
-                            double y = sign*s(1) * cos(theta);
-                            double z = sign*s(2) * sin(theta);
+                            double y = s(1) * cos(theta);
+                            double z = s(2) * sin(theta);
 
                             Eigen::Vector3d point = R * Eigen::Vector3d(x, y, z) + pos;
                             vtkIdType id = points->InsertNextPoint(point(0), point(1), point(2));
@@ -571,26 +583,44 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
                         }
                     }
 
-                    for (int i = 0; i < num_points_per_circle; ++i)
-                    {
-                        if (!previous_ring_ids.empty())
-                        {
-                            vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
-                            polygon->GetPointIds()->SetNumberOfIds(4);
-                            polygon->GetPointIds()->SetId(0, previous_ring_ids[i]);
-                            polygon->GetPointIds()->SetId(1, previous_ring_ids[(i + 1) % num_points_per_circle]);
-                            polygon->GetPointIds()->SetId(2, ring_ids[(i + 1) % num_points_per_circle]);
-                            polygon->GetPointIds()->SetId(3, ring_ids[i]);
-                            polys->InsertNextCell(polygon);
-                        }
-                    }
+                    // for (int i = 0; i < num_points_per_circle; ++i)
+                    // {
+                    //     if (!previous_ring_ids.empty())
+                    //     {
+                    //         vtkSmartPointer<vtkPolygon> polygon = vtkSmartPointer<vtkPolygon>::New();
+                    //         polygon->GetPointIds()->SetNumberOfIds(4);
+                    //         polygon->GetPointIds()->SetId(0, previous_ring_ids[i]);
+                    //         polygon->GetPointIds()->SetId(1, previous_ring_ids[(i + 1) % num_points_per_circle]);
+                    //         polygon->GetPointIds()->SetId(2, ring_ids[(i + 1) % num_points_per_circle]);
+                    //         polygon->GetPointIds()->SetId(3, ring_ids[i]);
+                    //         polys->InsertNextCell(polygon);
+                    //     }
+                    // }
 
-                    previous_ring_ids = ring_ids;
+                    // previous_ring_ids = ring_ids;
                 }
             }
-
             polyData->SetPoints(points);
             polyData->SetPolys(polys);
+
+
+            // Render the points
+            vtkSmartPointer<vtkPolyData> pointsPolyData = vtkSmartPointer<vtkPolyData>::New();
+            pointsPolyData->SetPoints(points);
+
+            vtkSmartPointer<vtkVertexGlyphFilter> vertexFilter = vtkSmartPointer<vtkVertexGlyphFilter>::New();
+            vertexFilter->SetInputData(pointsPolyData);
+            vertexFilter->Update();
+
+            vtkSmartPointer<vtkPolyDataMapper> pointsMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+            pointsMapper->SetInputConnection(vertexFilter->GetOutputPort());
+
+            vtkSmartPointer<vtkActor> pointsActor = vtkSmartPointer<vtkActor>::New();
+            pointsActor->SetMapper(pointsMapper);
+            pointsActor->GetProperty()->SetColor(1, 0, 0); // Red color for points
+            pointsActor->GetProperty()->SetPointSize(5); // Set point size
+
+            //mp_ren->AddActor(pointsActor);
 
             vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
             mapper->SetInputData(polyData);
@@ -604,7 +634,7 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
             actor->GetProperty()->SetSpecular(0.5); // Increase specular for shininess
             actor->GetProperty()->SetSpecularPower(20); // Increase specular power for sharper highlights
 
-            mp_ren->AddActor(actor);
+            //mp_ren->AddActor(actor);
         }
 
         if(m_topology.common_end_effector)
@@ -831,12 +861,9 @@ void Visualizer::InitScene()
         for(unsigned int k = 0; k < m_topology.K[n]; k++)
         {
             vtkSmartPointer<vtkAxesActor> robot_axes = vtkSmartPointer<vtkAxesActor>::New();
-            robot_axes->SetXAxisLabelText("");
-            robot_axes->SetYAxisLabelText("");
-            robot_axes->SetZAxisLabelText("");
-            robot_axes->SetShaftTypeToCylinder();
-            robot_axes->SetCylinderRadius(0.025);
-            robot_axes->SetTotalLength(0.01,0.01,0.01);
+            robot_axes->SetTotalLength(0.025, 0.025, 0.025);
+            robot_axes->SetShaftType(0);
+            robot_axes->SetAxisLabels(0);
             robot_axes->SetVisibility(true);
             mp_axes.push_back(robot_axes);
             mp_ren->AddActor(robot_axes);
@@ -896,7 +923,7 @@ void Visualizer::InitScene()
                 vtkSmartPointer<vtkActor> ellipsoid_actor = vtkSmartPointer<vtkActor>::New();
                 ellipsoid_actor->SetMapper(ellipsoid_mapper);
                 ellipsoid_actor->GetProperty()->SetColor(0, 0, 1);
-                ellipsoid_actor->GetProperty()->SetOpacity(0.1); // Increase opacity for better 3D effect
+                ellipsoid_actor->GetProperty()->SetOpacity(0.05); // Increase opacity for better 3D effect
                 ellipsoid_actor->GetProperty()->SetAmbient(0.2); // Adjust ambient lighting
                 ellipsoid_actor->GetProperty()->SetDiffuse(0.7); // Increase diffuse lighting for better shading
                 ellipsoid_actor->GetProperty()->SetSpecular(0.5); // Increase specular for shininess
