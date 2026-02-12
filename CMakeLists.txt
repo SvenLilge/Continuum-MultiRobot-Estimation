@@ -27,6 +27,7 @@ add_executable(2_parallel_continuum_robot src/examples/2_parallel_continuum_robo
 add_executable(3_continuous_stewart_gough src/examples/3_continuous_stewart_gough.cpp ${H_FILES} ${CPP_FILES})
 add_executable(4_collaborative_continuum_robots src/examples/4_collaborative_continuum_robots.cpp ${H_FILES} ${CPP_FILES})
 add_executable(5_fbg_measurements src/examples/5_fbg_measurements.cpp ${H_FILES} ${CPP_FILES})
+add_executable(6_comparison_tongjia src/examples/6_comparison_tongjia.cpp ${H_FILES} ${CPP_FILES})
 
 # Link the necessary libraries
 target_link_libraries(1_continuum_robot ${VTK_LIBRARIES} Eigen3::Eigen)
@@ -34,6 +35,7 @@ target_link_libraries(2_parallel_continuum_robot ${VTK_LIBRARIES} Eigen3::Eigen)
 target_link_libraries(3_continuous_stewart_gough ${VTK_LIBRARIES} Eigen3::Eigen)
 target_link_libraries(4_collaborative_continuum_robots ${VTK_LIBRARIES} Eigen3::Eigen)
 target_link_libraries(5_fbg_measurements ${VTK_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(6_comparison_tongjia ${VTK_LIBRARIES} Eigen3::Eigen)
 
 # Set the output directory for the executable
 set_target_properties(1_continuum_robot PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
@@ -41,3 +43,4 @@ set_target_properties(2_parallel_continuum_robot PROPERTIES RUNTIME_OUTPUT_DIREC
 set_target_properties(3_continuous_stewart_gough PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
 set_target_properties(4_collaborative_continuum_robots PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
 set_target_properties(5_fbg_measurements PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
+set_target_properties(6_comparison_tongjia PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
