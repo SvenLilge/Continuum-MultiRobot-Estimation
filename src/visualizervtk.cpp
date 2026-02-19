@@ -540,7 +540,7 @@ void Visualizer::InitScene()
     //Camera
     mp_ren->GetActiveCamera()->SetPosition(0,0,0);
     mp_ren->GetActiveCamera()->SetFocalPoint(-0.4,0.5,0.5);
-    //mp_ren->GetActiveCamera()->SetViewUp(1,0,0);
+    mp_ren->GetActiveCamera()->SetViewUp(0,1,0);
 
 
     //Update scene

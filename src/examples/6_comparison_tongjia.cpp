@@ -21,7 +21,8 @@ VTK_MODULE_INIT(vtkInteractionStyle);
 int main(int argc, char *argv[])
 {
     // Load data
-    std::string file_name = "../data/dataTongjia.csv";
+    std::string file_name = "../data/RSS2026/base 1/multiCR oscillation 1/dataVicon.csv";
+    //std::string file_name = "../data/dataTongjia.csv";
     Eigen::MatrixXd data = load_csv<Eigen::MatrixXd>(file_name, true);
 
     // Data format:
@@ -30,6 +31,7 @@ int main(int argc, char *argv[])
     // Sample range to iterate over
     int sample_start = 0;
     int sample_end = static_cast<int>(data.rows()) - 1;
+    sample_end = sample_start; 
     if(sample_end < 0) return 1;
     int sample_step = 10;
 
@@ -82,8 +84,8 @@ int main(int argc, char *argv[])
     ContinuumRobotStateEstimator::RobotTopology topology;
 
     topology.N =2;
-    topology.K = std::vector<unsigned int>{11,11};
-    topology.M = std::vector<unsigned int>{3,3};
+    topology.K = std::vector<unsigned int>{13,13};
+    topology.M = std::vector<unsigned int>{2,2};
     topology.L = std::vector<double>{0.54,0.54};
     topology.lock_first_pose = std::vector<bool>{true,true};
     topology.lock_last_pose = std::vector<bool>{false,false};
@@ -132,9 +134,9 @@ int main(int argc, char *argv[])
     Eigen::Matrix<double,6,1> R_coupling;
     R_coupling << 1, 1, 1, 1, 1, 1;
     Eigen::Matrix<double,6,1> Qc;
-    Qc << 1e-1, 1e-1, 1e-1, 1e2, 1e2, 1e2;
+    Qc << 1e-1, 1e-1, 1e-1, 1e1, 1e1, 1e1;
 
-    params.R_pose = 1*R_pose.asDiagonal();
+    params.R_pose = 1e-1*R_pose.asDiagonal();
     params.R_strain = 10*R_strain.asDiagonal();
     params.R_fbg_strain = 20e0*R_fbg_strain.asDiagonal();
     params.R_coupling = 1e-8*R_coupling.asDiagonal();
@@ -143,8 +145,8 @@ int main(int argc, char *argv[])
     // Solver options
     ContinuumRobotStateEstimator::Options options;
     options.init_guess_type = ContinuumRobotStateEstimator::Options::InitialGuessType::Last;
-    options.solver = ContinuumRobotStateEstimator::Options::Solver::NewtonLineSearch;
-    options.max_optimization_iterations = 200;
+    options.solver = ContinuumRobotStateEstimator::Options::Solver::Newton;
+    options.max_optimization_iterations = 20;
     options.kirchhoff_rods = true;
     options.convergence_threshold = 5e-1;
 
@@ -178,6 +180,15 @@ int main(int argc, char *argv[])
         Visualizer* vis{nullptr};
     } shared;
     shared.vis = &vis;
+
+    std::vector<Eigen::MatrixXd> accuracy; // For each sample, store error between estimate and measurement for each disk
+
+
+    std::vector<Eigen::MatrixXd> estimates; // For each sample, store the estimated T_disks
+
+
+    std::vector<double> computation_times; // For each sample, store the computation time of the state estimation
+
 
     // Worker thread: computes estimates off the UI thread and publishes latest result
     std::thread worker([&](){
@@ -235,7 +246,48 @@ int main(int argc, char *argv[])
             // Compute state estimate (heavy work off UI thread)
             ContinuumRobotStateEstimator::SystemState state;
             std::vector<double> cost;
-            state_estimator.computeStateEstimate(state, cost, measurements, true);
+
+            auto start = std::chrono::high_resolution_clock::now();
+            state_estimator.computeStateEstimate(state, cost, measurements, false);
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            computation_times.push_back(duration.count() / 1000.0); // Store in milliseconds
+
+            // Store estimate of each disk for analysis
+            Eigen::MatrixXd T_disk_estimated;
+            T_disk_estimated.resize(4*7,4); // 7 disks, each with a 4x4 transform
+            // First disk is first node of second robot
+            T_disk_estimated.block(0,0,4,4) = state.robots.at(1).estimation_nodes.at(0).pose;
+            // Second disk is fifth node of second robot
+            T_disk_estimated.block(4,0,4,4) = state.robots.at(1).estimation_nodes.at(4).pose;
+            // Third disk is ninth node of second robot
+            T_disk_estimated.block(8,0,4,4) = state.robots.at(1).estimation_nodes.at(8).pose;
+            // Fourth disk is first node of first robot
+            T_disk_estimated.block(12,0,4,4) = state.robots.at(0).estimation_nodes.at(0).pose;
+            // Fifth disk is fifth node of first robot
+            T_disk_estimated.block(16,0,4,4) = state.robots.at(0).estimation_nodes.at(4).pose;
+            // Sixth disk is ninth node of first robot
+            T_disk_estimated.block(20,0,4,4) = state.robots.at(0).estimation_nodes.at(8).pose;
+            // Seventh disk is thirteenth node of first robot
+            T_disk_estimated.block(24,0,4,4) = state.robots.at(0).estimation_nodes.at(12).pose;
+            estimates.push_back(T_disk_estimated);
+
+            // Compare estimate to measurement and store accuracy
+            Eigen::MatrixXd acc;
+            acc.resize(7,2); // 7 disks, each with 2 error components (pos and rot)
+            for(unsigned int d = 0; d < 7; d++)
+            {
+                Eigen::Matrix4d T_est = T_disk_estimated.block(d*4,0,4,4);
+                Eigen::Matrix4d T_meas = T_disks.at(d);
+
+                Eigen::Matrix4d T_err = T_est * invert_transformation(T_meas);
+                Eigen::Matrix<double,6,1> err_vec = tran_to_vec(T_err);
+
+                acc(d,0) = err_vec.block(0,0,3,1).norm(); // position error
+                acc(d,1) = err_vec.block(3,0,3,1).norm(); // orientation error
+            }
+
+            accuracy.push_back(acc);
 
             // Publish result (wait if UI hasn't consumed previous)
             while(shared.new_state.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -250,6 +302,28 @@ int main(int argc, char *argv[])
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         shared.finished.store(true);
+
+        // After finishing all samples, print accuracy results (average all samples)
+        Eigen::MatrixXd acc_sum;
+        acc_sum.resize(7,2);
+        acc_sum.setZero();
+        for(int i = 0; i < accuracy.size(); i++)        {
+            acc_sum = acc_sum + accuracy.at(i);
+        }
+        Eigen::MatrixXd acc_avg = acc_sum / static_cast<double>(accuracy.size());
+        std::cout << "Average accuracy over " << accuracy.size() << " samples:" << std::endl;
+        for(unsigned int d = 0; d < 7; d++)        {
+            std::cout << "Disk " << d << ": Position error = " << acc_avg(d,0) << " m, Orientation error = " << acc_avg(d,1) << " rad" << std::endl;
+        }
+
+        // Print average computation time
+        double comp_time_sum = 0.0;
+        for(int i = 0; i < computation_times.size(); i++)        {
+            comp_time_sum += computation_times.at(i);
+        }
+        double comp_time_avg = comp_time_sum / static_cast<double>(computation_times.size());
+        std::cout << "Average computation time: " << comp_time_avg << " ms" << std::endl;
+
     });
 
     // Timer callback: if worker published a new state, update visualizer and render
