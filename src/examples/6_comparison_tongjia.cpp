@@ -13,6 +13,9 @@
 #include <fstream>
 #include <iomanip>
 
+// include for eulerAngles
+#include <Eigen/Geometry>
+
 
 // VTK Factory initialisation (for VTK version above 6)
 #include <vtkAutoInit.h>
@@ -104,21 +107,27 @@ void interpolateDiskData(const Eigen::MatrixXd& data, int row1, int row2, double
 // This reverses the construction: R = Rx * Ry * Rz
 void rotationMatrixToEulerXYZ(const Eigen::Matrix3d& R, double& rotX, double& rotY, double& rotZ)
 {
-    // Extract Euler angles from rotation matrix using XYZ convention
-    // R = Rx(rotX) * Ry(rotY) * Rz(rotZ)
+    // Convert rotation matrix to XYZ Euler angles
+    // Based on: https://www.learnopencv.com/rotation-matrix-to-euler-angles/
     
-    rotY = std::asin(-R(2,0));
-    
-    if(std::abs(std::cos(rotY)) > 1e-6)
+    rotY = std::asin(R(0,2));
+
+    double cy = std::cos(rotY);
+
+    if (std::abs(cy) > 1e-6)  // Not gimbal lock
     {
-        rotX = std::atan2(R(2,1), R(2,2));
-        rotZ = std::atan2(R(1,0), R(0,0));
+        rotX = std::atan2(-R(1,2), R(2,2));
+        rotZ = std::atan2(-R(0,1), R(0,0));
     }
     else
     {
-        // Gimbal lock case
+        // Gimbal lock: cos(rotY) ≈ 0
         rotX = 0.0;
-        rotZ = std::atan2(-R(0,1), R(1,1));
+
+        if (R(0,2) > 0)  // rotY ≈ +pi/2
+            rotZ = std::atan2(R(1,0), R(1,1));
+        else             // rotY ≈ -pi/2
+            rotZ = std::atan2(-R(1,0), R(1,1));
     }
 }
 
@@ -220,7 +229,7 @@ int main(int argc, char *argv[])
     
     // Sampling mode: either sample_step or refresh_rate
     bool use_refresh_rate = true;
-    double refresh_rate = 40.0; // Hz, default
+    double refresh_rate = 5.0; // Hz, default
     int sample_step = 10;
     
     // Parse command line arguments
