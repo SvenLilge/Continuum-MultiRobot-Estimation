@@ -213,7 +213,7 @@ void exportResultsToCSV(const std::string& output_file,
 int main(int argc, char *argv[])
 {
     // Load data
-    std::string file_name = "../data/RSS2026/base 1/multiCR oscillation 1/dataVicon.csv";
+    std::string file_name = "../data/RSS2026/base 1/multiCR oscillation 2/dataVicon.csv";
     //std::string file_name = "../data/dataTongjia.csv";
     Eigen::MatrixXd data = load_csv<Eigen::MatrixXd>(file_name, true);
 
@@ -227,7 +227,7 @@ int main(int argc, char *argv[])
     
     // Sampling mode: either sample_step or refresh_rate
     bool use_refresh_rate = true;
-    double refresh_rate = 5.0; // Hz, default
+    double refresh_rate = 40.0; // Hz, default
     int sample_step = 10;
     
     // Parse command line arguments

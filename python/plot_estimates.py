@@ -9,12 +9,56 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
+from scipy.linalg import logm
 
 
 def load_data(csv_file):
     """Load CSV file and return dataframe."""
     df = pd.read_csv(csv_file)
     return df
+
+
+def euler_to_rotation_matrix(rotX, rotY, rotZ):
+    """Convert Euler angles to rotation matrix using XYZ convention.
+    
+    Args:
+        rotX, rotY, rotZ: Euler angles in radians (XYZ convention)
+    
+    Returns:
+        3x3 rotation matrix R = Rx * Ry * Rz
+    """
+    cx, sx = np.cos(rotX), np.sin(rotX)
+    cy, sy = np.cos(rotY), np.sin(rotY)
+    cz, sz = np.cos(rotZ), np.sin(rotZ)
+    
+    Rx = np.array([[1,  0,   0],
+                   [0, cx, -sx],
+                   [0, sx,  cx]])
+    
+    Ry = np.array([[cy, 0, sy],
+                   [0,  1,  0],
+                   [-sy, 0, cy]])
+    
+    Rz = np.array([[cz, -sz, 0],
+                   [sz,  cz, 0],
+                   [0,   0,  1]])
+    
+    return Rx @ Ry @ Rz
+
+
+def compute_orientation_error(R1, R2):
+    """Compute orientation error between two rotation matrices.
+    
+    Args:
+        R1, R2: 3x3 rotation matrices
+    
+    Returns:
+        Scalar error: norm of log(inv(R1) * R2)
+    """
+    R_error = np.linalg.inv(R1) @ R2
+    log_R_error = logm(R_error)
+    # Frobenius norm of the matrix logarithm
+    return np.linalg.norm(log_R_error)
 
 
 def plot_disk_comparison(ax, gt_data, est_data, disk_idx, component, ylabel):
@@ -84,22 +128,22 @@ def plot_all_disks(gt_data, est_data, output_dir=None):
 
 
 def plot_individual_disks(gt_data, est_data, output_dir=None):
-    """Generate individual plots for each disk with position and orientation subplots."""
+    """Generate individual plots for each disk with position, orientation, and error subplots."""
     
     n_disks = 7
     components = ['x', 'y', 'z']
     rot_components = ['rotX', 'rotY', 'rotZ']
     
     for disk_idx in range(n_disks):
-        fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         fig.suptitle(f'Disk {disk_idx} - Pose Comparison (Ground Truth vs Estimated)', 
                     fontsize=14, fontweight='bold')
         
         t_gt = gt_data['timestamp'].values
         t_est = est_data['timestamp'].values
         
-        # Position subplot
-        ax_pos = axes[0]
+        # Position subplot (top-left)
+        ax_pos = axes[0, 0]
         for comp_idx, comp in enumerate(components):
             # GT column format: "disk_0 x (m)"
             gt_col = f'disk_{disk_idx} {comp} (m)'
@@ -120,8 +164,8 @@ def plot_individual_disks(gt_data, est_data, output_dir=None):
         ax_pos.grid(True, alpha=0.3)
         ax_pos.legend(loc='best', fontsize=9, ncol=2)
         
-        # Orientation subplot
-        ax_rot = axes[1]
+        # Orientation subplot (top-right)
+        ax_rot = axes[0, 1]
         for comp_idx, comp in enumerate(rot_components):
             # GT column format: "disk_0 rotX (rad)"
             gt_col = f'disk_{disk_idx} {comp} (rad)'
@@ -141,6 +185,99 @@ def plot_individual_disks(gt_data, est_data, output_dir=None):
         ax_rot.set_title('Orientation (rotX, rotY, rotZ)', fontsize=12, fontweight='bold')
         ax_rot.grid(True, alpha=0.3)
         ax_rot.legend(loc='best', fontsize=9, ncol=2)
+        
+        # Position error subplot (bottom-left)
+        ax_pos_err = axes[1, 0]
+        pos_errors = []
+        pos_error_times = []
+        
+        for i, t in enumerate(t_est):
+            # Find closest GT timestamp
+            idx_gt = np.argmin(np.abs(t_gt - t))
+            
+            # Get GT position
+            gt_x_col = f'disk_{disk_idx} x (m)'
+            gt_y_col = f'disk_{disk_idx} y (m)'
+            gt_z_col = f'disk_{disk_idx} z (m)'
+            
+            # Get estimated position
+            est_x_col = f'disk_{disk_idx}_x'
+            est_y_col = f'disk_{disk_idx}_y'
+            est_z_col = f'disk_{disk_idx}_z'
+            
+            if all(col in gt_data.columns for col in [gt_x_col, gt_y_col, gt_z_col]) and \
+               all(col in est_data.columns for col in [est_x_col, est_y_col, est_z_col]):
+                
+                gt_pos = np.array([
+                    gt_data[gt_x_col].iloc[idx_gt],
+                    gt_data[gt_y_col].iloc[idx_gt],
+                    gt_data[gt_z_col].iloc[idx_gt]
+                ])
+                
+                est_pos = np.array([
+                    est_data[est_x_col].iloc[i],
+                    est_data[est_y_col].iloc[i],
+                    est_data[est_z_col].iloc[i]
+                ])
+                
+                pos_error = np.linalg.norm(gt_pos - est_pos)
+                pos_errors.append(pos_error)
+                pos_error_times.append(t)
+        
+        if pos_errors:
+            ax_pos_err.plot(pos_error_times, pos_errors, 'r-', linewidth=2, label='Position Error')
+            ax_pos_err.set_xlabel('Time (s)', fontsize=11)
+            ax_pos_err.set_ylabel('Error (m)', fontsize=11)
+            ax_pos_err.set_title('Position Error Norm', fontsize=12, fontweight='bold')
+            ax_pos_err.grid(True, alpha=0.3)
+            ax_pos_err.legend(loc='best', fontsize=9)
+        
+        # Orientation error subplot (bottom-right)
+        ax_rot_err = axes[1, 1]
+        rot_errors = []
+        rot_error_times = []
+        
+        for i, t in enumerate(t_est):
+            # Find closest GT timestamp
+            idx_gt = np.argmin(np.abs(t_gt - t))
+            
+            # Get GT Euler angles
+            gt_rotX_col = f'disk_{disk_idx} rotX (rad)'
+            gt_rotY_col = f'disk_{disk_idx} rotY (rad)'
+            gt_rotZ_col = f'disk_{disk_idx} rotZ (rad)'
+            
+            # Get estimated Euler angles
+            est_rotX_col = f'disk_{disk_idx}_rotX'
+            est_rotY_col = f'disk_{disk_idx}_rotY'
+            est_rotZ_col = f'disk_{disk_idx}_rotZ'
+            
+            if all(col in gt_data.columns for col in [gt_rotX_col, gt_rotY_col, gt_rotZ_col]) and \
+               all(col in est_data.columns for col in [est_rotX_col, est_rotY_col, est_rotZ_col]):
+                
+                # Construct GT rotation matrix
+                gt_rotX = gt_data[gt_rotX_col].iloc[idx_gt]
+                gt_rotY = gt_data[gt_rotY_col].iloc[idx_gt]
+                gt_rotZ = gt_data[gt_rotZ_col].iloc[idx_gt]
+                R_gt = euler_to_rotation_matrix(gt_rotX, gt_rotY, gt_rotZ)
+                
+                # Construct estimated rotation matrix
+                est_rotX = est_data[est_rotX_col].iloc[i]
+                est_rotY = est_data[est_rotY_col].iloc[i]
+                est_rotZ = est_data[est_rotZ_col].iloc[i]
+                R_est = euler_to_rotation_matrix(est_rotX, est_rotY, est_rotZ)
+                
+                # Compute orientation error
+                rot_error = compute_orientation_error(R_est, R_gt)
+                rot_errors.append(rot_error)
+                rot_error_times.append(t)
+        
+        if rot_errors:
+            ax_rot_err.plot(rot_error_times, rot_errors, 'b-', linewidth=2, label='Orientation Error')
+            ax_rot_err.set_xlabel('Time (s)', fontsize=11)
+            ax_rot_err.set_ylabel('Error (rad)', fontsize=11)
+            ax_rot_err.set_title('Orientation Error (||log(R)||)', fontsize=12, fontweight='bold')
+            ax_rot_err.grid(True, alpha=0.3)
+            ax_rot_err.legend(loc='best', fontsize=9)
         
         plt.tight_layout()
         
