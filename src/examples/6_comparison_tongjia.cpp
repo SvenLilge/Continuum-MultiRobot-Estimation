@@ -13,8 +13,6 @@
 #include <fstream>
 #include <iomanip>
 
-// include for eulerAngles
-#include <Eigen/Geometry>
 
 
 // VTK Factory initialisation (for VTK version above 6)
