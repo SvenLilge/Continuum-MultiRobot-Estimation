@@ -10,6 +10,8 @@
 #include <chrono>
 #include <mutex>
 #include <thread>
+#include <fstream>
+#include <iomanip>
 
 
 // VTK Factory initialisation (for VTK version above 6)
@@ -17,6 +19,12 @@
 VTK_MODULE_INIT(vtkRenderingOpenGL2);
 VTK_MODULE_INIT(vtkRenderingFreeType);
 VTK_MODULE_INIT(vtkInteractionStyle);
+
+// Structure to hold sample information for processing
+struct SampleInfo {
+    int row1, row2;  // surrounding rows for interpolation
+    double alpha;     // interpolation factor for refresh rate mode
+};
 
 // Helper function: Build T_disks from position and Euler angles (rotX, rotY, rotZ)
 Eigen::Matrix4d buildDiskTransformFromEulerData(double x, double y, double z, 
@@ -92,6 +100,109 @@ void interpolateDiskData(const Eigen::MatrixXd& data, int row1, int row2, double
     rotZ = (1.0 - alpha) * rotZ1 + alpha * rotZ2;
 }
 
+// Helper function: Convert rotation matrix back to Euler angles (XYZ convention)
+// This reverses the construction: R = Rx * Ry * Rz
+void rotationMatrixToEulerXYZ(const Eigen::Matrix3d& R, double& rotX, double& rotY, double& rotZ)
+{
+    // Extract Euler angles from rotation matrix using XYZ convention
+    // R = Rx(rotX) * Ry(rotY) * Rz(rotZ)
+    
+    rotY = std::asin(-R(2,0));
+    
+    if(std::abs(std::cos(rotY)) > 1e-6)
+    {
+        rotX = std::atan2(R(2,1), R(2,2));
+        rotZ = std::atan2(R(1,0), R(0,0));
+    }
+    else
+    {
+        // Gimbal lock case
+        rotX = 0.0;
+        rotZ = std::atan2(-R(0,1), R(1,1));
+    }
+}
+
+// Helper function: Revert axis permutation and extract Euler angles from T_disk
+void extractPoseFromTransform(const Eigen::Matrix4d& T_disk, double& x, double& y, double& z,
+                              double& rotX, double& rotY, double& rotZ)
+{
+    // Extract position
+    x = T_disk(0,3);
+    y = T_disk(1,3);
+    z = T_disk(2,3);
+    
+    // Revert axis permutation: the transform has permuted axes, we need to reverse it
+    Eigen::Matrix3d R_permuted = T_disk.block(0,0,3,3);
+    Eigen::Matrix3d R_original;
+    R_original.block(0,0,3,1) = R_permuted.block(0,1,3,1); // old x axis was new y axis
+    R_original.block(0,1,3,1) = R_permuted.block(0,2,3,1); // old y axis was new z axis
+    R_original.block(0,2,3,1) = R_permuted.block(0,0,3,1); // old z axis was new x axis
+    
+    // Convert rotation matrix to Euler angles
+    rotationMatrixToEulerXYZ(R_original, rotX, rotY, rotZ);
+}
+
+// Helper function: Export results to CSV file
+void exportResultsToCSV(const std::string& output_file,
+                        const std::vector<SampleInfo>& samples_to_process,
+                        const Eigen::MatrixXd& data,
+                        const std::vector<std::vector<Eigen::Matrix4d>>& estimated_T_disks,
+                        const std::vector<double>& computation_times)
+{
+    std::ofstream outfile(output_file);
+    
+    // Write header
+    outfile << "timestamp";
+    for(unsigned int d = 0; d < 7; d++)
+    {
+        outfile << ",disk_" << d << "_x,disk_" << d << "_y,disk_" << d << "_z,"
+                << "disk_" << d << "_rotX,disk_" << d << "_rotY,disk_" << d << "_rotZ";
+    }
+    outfile << ",computation_time_ms" << std::endl;
+    
+    // Write data rows
+    for(size_t sample_idx = 0; sample_idx < samples_to_process.size(); ++sample_idx)
+    {
+        const auto& sample_info = samples_to_process[sample_idx];
+        
+        // Interpolate timestamp
+        double t_interp;
+        if(sample_info.alpha > 1e-6)
+        {
+            double t1 = data(sample_info.row1, 0);
+            double t2 = data(sample_info.row2, 0);
+            t_interp = (1.0 - sample_info.alpha) * t1 + sample_info.alpha * t2;
+        }
+        else
+        {
+            t_interp = data(sample_info.row1, 0);
+        }
+        
+        outfile << std::fixed << std::setprecision(6) << t_interp;
+        
+        // Write pose for each disk
+        for(unsigned int d = 0; d < 7 && d < estimated_T_disks[sample_idx].size(); ++d)
+        {
+            double x, y, z, rotX, rotY, rotZ;
+            extractPoseFromTransform(estimated_T_disks[sample_idx][d], x, y, z, rotX, rotY, rotZ);
+            
+            outfile << "," << std::fixed << std::setprecision(6) << x
+                    << "," << std::fixed << std::setprecision(6) << y
+                    << "," << std::fixed << std::setprecision(6) << z
+                    << "," << std::fixed << std::setprecision(6) << rotX
+                    << "," << std::fixed << std::setprecision(6) << rotY
+                    << "," << std::fixed << std::setprecision(6) << rotZ;
+        }
+        
+        // Write computation time
+        outfile << "," << std::fixed << std::setprecision(3) << computation_times[sample_idx];
+        outfile << std::endl;
+    }
+    
+    outfile.close();
+    std::cout << "Results exported to " << output_file << std::endl;
+}
+
 int main(int argc, char *argv[])
 {
     // Load data
@@ -133,10 +244,6 @@ int main(int argc, char *argv[])
     }
     
     // Generate sample indices and interpolation parameters based on mode
-    struct SampleInfo {
-        int row1, row2;  // surrounding rows for interpolation
-        double alpha;     // interpolation factor for refresh rate mode
-    };
     std::vector<SampleInfo> samples_to_process;
     
     if(use_refresh_rate)
@@ -302,11 +409,11 @@ int main(int argc, char *argv[])
 
     std::vector<Eigen::MatrixXd> accuracy; // For each sample, store error between estimate and measurement for each disk
 
-
     std::vector<Eigen::MatrixXd> estimates; // For each sample, store the estimated T_disks
 
-
     std::vector<double> computation_times; // For each sample, store the computation time of the state estimation
+    
+    std::vector<std::vector<Eigen::Matrix4d>> estimated_T_disks; // Store estimated T_disks for each sample
 
 
     // Worker thread: computes estimates off the UI thread and publishes latest result
@@ -370,6 +477,14 @@ int main(int argc, char *argv[])
             T_disk_estimated.block(24,0,4,4) = state.robots.at(0).estimation_nodes.at(12).pose;
             estimates.push_back(T_disk_estimated);
 
+            // Store estimated T_disks as a vector for export
+            std::vector<Eigen::Matrix4d> estimated_disks_vec;
+            for(unsigned int d = 0; d < 7; d++)
+            {
+                estimated_disks_vec.push_back(T_disk_estimated.block(d*4,0,4,4));
+            }
+            estimated_T_disks.push_back(estimated_disks_vec);
+
             // Compare estimate to measurement and store accuracy
             Eigen::MatrixXd acc;
             acc.resize(7,2); // 7 disks, each with 2 error components (pos and rot)
@@ -422,6 +537,11 @@ int main(int argc, char *argv[])
         }
         double comp_time_avg = comp_time_sum / static_cast<double>(computation_times.size());
         std::cout << "Average computation time: " << comp_time_avg << " ms" << std::endl;
+
+        // Export results to CSV file
+        // define filename from input file (output file = input file_GP_estimates)
+        std::string output_filename = file_name.substr(0, file_name.find_last_of('/')) + "/GP_estimates.csv";
+        exportResultsToCSV(output_filename, samples_to_process, data, estimated_T_disks, computation_times);
 
     });
 
