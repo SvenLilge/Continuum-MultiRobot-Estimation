@@ -19,7 +19,7 @@ public:
     Visualizer(ContinuumRobotStateEstimator::RobotTopology topology);
     ~Visualizer();
 
-    void update(ContinuumRobotStateEstimator::SystemState state, bool render_frames = true, bool render_covariance = false, int n_std = 3);
+    void update(ContinuumRobotStateEstimator::SystemState state, bool render_frames = true, bool render_covariance = false, int n_std = 3, const std::vector<Eigen::Matrix4d>* T_disks_groundtruth = nullptr);
 	vtkSmartPointer<vtkRenderWindow> getRenderWindow();
 
 
@@ -35,6 +35,7 @@ private:
 
     //Stuff to visualize
     std::vector<vtkSmartPointer<vtkAxesActor>> mp_axes;
+    std::vector<vtkSmartPointer<vtkAxesActor>> mp_axes_groundtruth; // Ground truth T_disks
 
     std::vector<vtkSmartPointer<vtkPoints>> mp_backbone_points;
     std::vector<vtkSmartPointer<vtkActor>> mp_backbone_actors;

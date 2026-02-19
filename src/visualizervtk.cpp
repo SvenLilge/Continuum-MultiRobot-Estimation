@@ -37,7 +37,7 @@ vtkSmartPointer<vtkRenderWindow> Visualizer::getRenderWindow() {
 	return mp_renWin;
 }
 
-void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool render_frames, bool render_covariance, int n_std)
+void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool render_frames, bool render_covariance, int n_std, const std::vector<Eigen::Matrix4d>* T_disks_groundtruth)
 {
     //Backbones
     for(unsigned int n = 0; n < m_topology.N; n++)
@@ -163,6 +163,34 @@ void Visualizer::update(ContinuumRobotStateEstimator::SystemState state, bool re
         }
     }
 
+    //Update ground truth T_disks frames
+    if(T_disks_groundtruth && T_disks_groundtruth->size() == 7)
+    {
+        for(unsigned int d = 0; d < 7; d++)
+        {
+            Eigen::Matrix4d T = T_disks_groundtruth->at(d);
+            vtkSmartPointer<vtkMatrix4x4> vtkTransformMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+            
+            for(int i = 0; i < 4; i++)
+            {
+                for(int j = 0; j < 4; j++)
+                {
+                    vtkTransformMatrix->SetElement(i, j, T(i,j));
+                }
+            }
+            
+            mp_axes_groundtruth[d]->SetUserMatrix(vtkTransformMatrix);
+            mp_axes_groundtruth[d]->SetVisibility(true);
+        }
+    }
+    else
+    {
+        //Hide ground truth axes if not provided
+        for(unsigned int i = 0; i < mp_axes_groundtruth.size(); i++)
+        {
+            mp_axes_groundtruth[i]->SetVisibility(false);
+        }
+    }
 
     if(render_covariance)
     {
@@ -461,7 +489,26 @@ void Visualizer::InitScene()
         mp_ren->AddActor(ee_frame);
     }
 
-
+    //Ground truth T_disks visualization (7 disks)
+    for(unsigned int d = 0; d < 7; d++)
+    {
+        vtkSmartPointer<vtkAxesActor> gt_axes = vtkSmartPointer<vtkAxesActor>::New();
+        gt_axes->SetXAxisLabelText("");
+        gt_axes->SetYAxisLabelText("");
+        gt_axes->SetZAxisLabelText("");
+        gt_axes->SetShaftTypeToCylinder();
+        gt_axes->SetCylinderRadius(0.1);
+        gt_axes->SetTotalLength(0.008,0.008,0.008);
+        gt_axes->SetVisibility(true);
+        gt_axes->GetXAxisTipProperty()->SetColor(1,0,0);
+        gt_axes->GetYAxisTipProperty()->SetColor(1,0,0);
+        gt_axes->GetZAxisTipProperty()->SetColor(1,0,0);
+        gt_axes->GetXAxisShaftProperty()->SetColor(1,0,0);
+        gt_axes->GetYAxisShaftProperty()->SetColor(1,0,0);
+        gt_axes->GetZAxisShaftProperty()->SetColor(1,0,0);
+        mp_axes_groundtruth.push_back(gt_axes);
+        mp_ren->AddActor(gt_axes);
+    }
 
     //Covariance ellipsoids
     for(unsigned int n = 0; n < m_topology.N; n++)

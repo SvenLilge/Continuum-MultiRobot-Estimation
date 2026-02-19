@@ -31,7 +31,7 @@ int main(int argc, char *argv[])
     // Sample range to iterate over
     int sample_start = 0;
     int sample_end = static_cast<int>(data.rows()) - 1;
-    sample_end = sample_start; 
+    //sample_end = sample_start; 
     if(sample_end < 0) return 1;
     int sample_step = 10;
 
@@ -175,6 +175,7 @@ int main(int argc, char *argv[])
         std::mutex mtx;
         ContinuumRobotStateEstimator::SystemState latest_state;
         std::vector<double> latest_cost;
+        std::vector<Eigen::Matrix4d> latest_T_disks; // Ground truth T_disks
         std::atomic<bool> new_state{false};
         std::atomic<bool> finished{false};
         Visualizer* vis{nullptr};
@@ -280,7 +281,7 @@ int main(int argc, char *argv[])
                 Eigen::Matrix4d T_est = T_disk_estimated.block(d*4,0,4,4);
                 Eigen::Matrix4d T_meas = T_disks.at(d);
 
-                Eigen::Matrix4d T_err = T_est * invert_transformation(T_meas);
+                Eigen::Matrix4d T_err = invert_transformation(T_est) * T_meas;
                 Eigen::Matrix<double,6,1> err_vec = tran_to_vec(T_err);
 
                 acc(d,0) = err_vec.block(0,0,3,1).norm(); // position error
@@ -295,6 +296,7 @@ int main(int argc, char *argv[])
                 std::lock_guard<std::mutex> lk(shared.mtx);
                 shared.latest_state = state;
                 shared.latest_cost = cost;
+                shared.latest_T_disks = T_disks;
                 shared.new_state.store(true);
             }
 
@@ -334,15 +336,17 @@ int main(int argc, char *argv[])
         if(s->new_state.load())
         {
             ContinuumRobotStateEstimator::SystemState state_copy;
+            std::vector<Eigen::Matrix4d> T_disks_copy;
             {
                 std::lock_guard<std::mutex> lk(s->mtx);
                 state_copy = s->latest_state;
+                T_disks_copy = s->latest_T_disks;
                 s->new_state.store(false);
             }
             // update visualizer and render
             if(s->vis)
             {
-                s->vis->update(state_copy, true, true, 3);
+                s->vis->update(state_copy, true, true, 3, &T_disks_copy);
                 s->vis->getRenderWindow()->Render();
             }
         }
