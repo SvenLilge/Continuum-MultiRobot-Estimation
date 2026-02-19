@@ -18,6 +18,80 @@ VTK_MODULE_INIT(vtkRenderingOpenGL2);
 VTK_MODULE_INIT(vtkRenderingFreeType);
 VTK_MODULE_INIT(vtkInteractionStyle);
 
+// Helper function: Build T_disks from position and Euler angles (rotX, rotY, rotZ)
+Eigen::Matrix4d buildDiskTransformFromEulerData(double x, double y, double z, 
+                                                       double rotX, double rotY, double rotZ)
+{
+    std::vector<Eigen::Matrix4d> T_disks;
+    
+    // Build Euler angle rotation matrices
+    Eigen::Matrix3d Rx, Ry, Rz;
+    double cx = std::cos(rotX), sx = std::sin(rotX);
+    double cy = std::cos(rotY), sy = std::sin(rotY);
+    double cz = std::cos(rotZ), sz = std::sin(rotZ);
+
+    Rx << 1,  0,   0,
+          0, cx, -sx,
+          0, sx,  cx;
+
+    Ry <<  cy, 0, sy,
+           0, 1,  0,
+         -sy, 0, cy;
+
+    Rz << cz, -sz, 0,
+          sz,  cz, 0,
+           0,   0, 1;
+
+    Eigen::Matrix3d R = Rx * Ry * Rz;
+    
+    
+    Eigen::Matrix4d T_disk = Eigen::Matrix4d::Identity();
+    T_disk.block(0,3,3,1) << x, y, z;
+    T_disk.block(0,0,3,3) = R;
+    
+    // Axis permutation
+    Eigen::Matrix3d R_rot = T_disk.block(0,0,3,3);
+    Eigen::Matrix3d R_new;
+    R_new.block(0,0,3,1) = R_rot.block(0,2,3,1); // new x axis is old z axis
+    R_new.block(0,1,3,1) = R_rot.block(0,0,3,1); // new y axis is old x axis
+    R_new.block(0,2,3,1) = R_rot.block(0,1,3,1); // new z axis is old y axis
+    T_disk.block(0,0,3,3) = R_new;
+    
+    return T_disk;
+}
+
+// Helper function: Extract position and Euler angles from a data row for a specific disk
+void extractDiskData(const Eigen::MatrixXd& data, int row, int disk_idx,
+                     double& x, double& y, double& z, double& rotX, double& rotY, double& rotZ)
+{
+    x = data(row, 1 + disk_idx*7 + 1);
+    y = data(row, 1 + disk_idx*7 + 2);
+    z = data(row, 1 + disk_idx*7 + 3);
+    rotX = data(row, 1 + disk_idx*7 + 4);
+    rotY = data(row, 1 + disk_idx*7 + 5);
+    rotZ = data(row, 1 + disk_idx*7 + 6);
+}
+
+// Helper function: Interpolate disk data between two rows
+void interpolateDiskData(const Eigen::MatrixXd& data, int row1, int row2, double alpha,
+                        int disk_idx, double& x, double& y, double& z, 
+                        double& rotX, double& rotY, double& rotZ)
+{
+    double x1, y1, z1, rotX1, rotY1, rotZ1;
+    double x2, y2, z2, rotX2, rotY2, rotZ2;
+    
+    extractDiskData(data, row1, disk_idx, x1, y1, z1, rotX1, rotY1, rotZ1);
+    extractDiskData(data, row2, disk_idx, x2, y2, z2, rotX2, rotY2, rotZ2);
+    
+    // Linear interpolation for position and Euler angles
+    x = (1.0 - alpha) * x1 + alpha * x2;
+    y = (1.0 - alpha) * y1 + alpha * y2;
+    z = (1.0 - alpha) * z1 + alpha * z2;
+    rotX = (1.0 - alpha) * rotX1 + alpha * rotX2;
+    rotY = (1.0 - alpha) * rotY1 + alpha * rotY2;
+    rotZ = (1.0 - alpha) * rotZ1 + alpha * rotZ2;
+}
+
 int main(int argc, char *argv[])
 {
     // Load data
@@ -31,54 +105,98 @@ int main(int argc, char *argv[])
     // Sample range to iterate over
     int sample_start = 0;
     int sample_end = static_cast<int>(data.rows()) - 1;
-    //sample_end = sample_start; 
     if(sample_end < 0) return 1;
+    
+    // Sampling mode: either sample_step or refresh_rate
+    bool use_refresh_rate = true;
+    double refresh_rate = 40.0; // Hz, default
     int sample_step = 10;
+    
+    // Parse command line arguments
+    for(int i = 1; i < argc; i++)
+    {
+        std::string arg = argv[i];
+        if(arg == "--refresh-rate" && i + 1 < argc)
+        {
+            use_refresh_rate = true;
+            refresh_rate = std::stod(argv[i + 1]);
+            i++;
+            std::cout << "Using refresh rate mode: " << refresh_rate << " Hz" << std::endl;
+        }
+        else if(arg == "--sample-step" && i + 1 < argc)
+        {
+            use_refresh_rate = false;
+            sample_step = std::stoi(argv[i + 1]);
+            i++;
+            std::cout << "Using sample step mode with step size: " << sample_step << std::endl;
+        }
+    }
+    
+    // Generate sample indices and interpolation parameters based on mode
+    struct SampleInfo {
+        int row1, row2;  // surrounding rows for interpolation
+        double alpha;     // interpolation factor for refresh rate mode
+    };
+    std::vector<SampleInfo> samples_to_process;
+    
+    if(use_refresh_rate)
+    {
+        // Generate time-based samples with interpolation
+        double t_start = data(sample_start, 0);
+        double t_end = data(sample_end, 0);
+        double dt = 1.0 / refresh_rate;
+        
+        for(double t = t_start; t <= t_end; t += dt)
+        {
+            // Find the two surrounding samples in the data
+            int idx_lower = sample_start;
+            int idx_upper = sample_end;
+            
+            for(int s = sample_start; s <= sample_end; s++)
+            {
+                if(data(s, 0) <= t)
+                    idx_lower = s;
+                if(data(s, 0) >= t && idx_upper == sample_end)
+                {
+                    idx_upper = s;
+                    break;
+                }
+            }
+            
+            double alpha = 0.0;
+            if(idx_lower != idx_upper)
+            {
+                double t1 = data(idx_lower, 0);
+                double t2 = data(idx_upper, 0);
+                if(t2 > t1)
+                    alpha = (t - t1) / (t2 - t1);
+            }
+            
+            samples_to_process.push_back({idx_lower, idx_upper, alpha});
+        }
+        
+        std::cout << "Generated " << samples_to_process.size() << " samples at " << refresh_rate << " Hz" << std::endl;
+    }
+    else
+    {
+        // Use sample step
+        for(int s = sample_start; s <= sample_end; s += sample_step)
+        {
+            samples_to_process.push_back({s, s, 0.0});
+        }
+        std::cout << "Using sample step of " << sample_step << ", processing " << samples_to_process.size() << " samples" << std::endl;
+    }
 
     // Prepare topology based on the first sample (sample_start)
-    int sample = sample_start;
-
-    // Build T_disks for the initial sample (same code as before)
+    double x, y, z, rotX, rotY, rotZ;
     std::vector<Eigen::Matrix4d> T_disks_init;
-    for(unsigned int i = 0; i < 7; i++)
+    for(int disk_idx = 0; disk_idx < 7; disk_idx++) // Assuming 2 disks for this example
     {
-        Eigen::Matrix4d T_disk = Eigen::Matrix4d::Identity();
-        T_disk.block(0,3,3,1) << data(sample, 1 + i*7 + 1), data(sample, 1 + i*7 + 2), data(sample, 1 + i*7 + 3);
-        double rotX = data(sample, 1 + i*7 + 4);
-        double rotY = data(sample, 1 + i*7 + 5);
-        double rotZ = data(sample, 1 + i*7 + 6);
-
-        Eigen::Matrix3d Rx, Ry, Rz;
-        double cx = std::cos(rotX), sx = std::sin(rotX);
-        double cy = std::cos(rotY), sy = std::sin(rotY);
-        double cz = std::cos(rotZ), sz = std::sin(rotZ);
-
-        Rx << 1,  0,   0,
-              0, cx, -sx,
-              0, sx,  cx;
-
-        Ry <<  cy, 0, sy,
-               0, 1,  0,
-             -sy, 0, cy;
-
-        Rz << cz, -sz, 0,
-              sz,  cz, 0,
-               0,   0, 1;
-
-        Eigen::Matrix3d R = Rx * Ry * Rz;
-        T_disk.block(0,0,3,3) = R;
+        extractDiskData(data, sample_start, disk_idx, x, y, z, rotX, rotY, rotZ);
+        Eigen::Matrix4d T_disk = buildDiskTransformFromEulerData(x, y, z, rotX, rotY, rotZ);
         T_disks_init.push_back(T_disk);
-    }
-    // Axis permutation
-    for(unsigned int i = 0; i < T_disks_init.size(); i++)
-    {
-        Eigen::Matrix3d R = T_disks_init.at(i).block(0,0,3,3);
-        Eigen::Matrix3d R_new;
-        R_new.block(0,0,3,1) = R.block(0,2,3,1); // new x axis is old z axis
-        R_new.block(0,1,3,1) = R.block(0,0,3,1); // new y axis is old x axis
-        R_new.block(0,2,3,1) = R.block(0,1,3,1); // new z axis is old y axis
-        T_disks_init.at(i).block(0,0,3,3) = R_new;
-    }
+    }   
+
 
     // Define robot topology (use initial transforms)
     ContinuumRobotStateEstimator::RobotTopology topology;
@@ -193,48 +311,27 @@ int main(int argc, char *argv[])
 
     // Worker thread: computes estimates off the UI thread and publishes latest result
     std::thread worker([&](){
-        for(int s = sample_start; s <= sample_end; s += sample_step)
+        for(const auto& sample_info : samples_to_process)
         {
-            // Build T_disks for sample s
+            // Build T_disks for this sample (with interpolation if needed)
             std::vector<Eigen::Matrix4d> T_disks;
-            for(unsigned int i = 0; i < 7; i++)
+            for(unsigned int disk_idx = 0; disk_idx < 7; disk_idx++)
             {
-                Eigen::Matrix4d T_disk = Eigen::Matrix4d::Identity();
-                T_disk.block(0,3,3,1) << data(s, 1 + i*7 + 1), data(s, 1 + i*7 + 2), data(s, 1 + i*7 + 3);
-                double rotX = data(s, 1 + i*7 + 4);
-                double rotY = data(s, 1 + i*7 + 5);
-                double rotZ = data(s, 1 + i*7 + 6);
-
-                Eigen::Matrix3d Rx, Ry, Rz;
-                double cx = std::cos(rotX), sx = std::sin(rotX);
-                double cy = std::cos(rotY), sy = std::sin(rotY);
-                double cz = std::cos(rotZ), sz = std::sin(rotZ);
-
-                Rx << 1,  0,   0,
-                      0, cx, -sx,
-                      0, sx,  cx;
-
-                Ry <<  cy, 0, sy,
-                       0, 1,  0,
-                     -sy, 0, cy;
-
-                Rz << cz, -sz, 0,
-                      sz,  cz, 0,
-                       0,   0, 1;
-
-                Eigen::Matrix3d R = Rx * Ry * Rz;
-                T_disk.block(0,0,3,3) = R;
+                double x, y, z, rotX, rotY, rotZ;
+                
+                if(sample_info.alpha > 1e-6)  // Need interpolation
+                {
+                    interpolateDiskData(data, sample_info.row1, sample_info.row2, sample_info.alpha,
+                                       disk_idx, x, y, z, rotX, rotY, rotZ);
+                }
+                else  // No interpolation needed, use row1 directly
+                {
+                    extractDiskData(data, sample_info.row1, disk_idx, x, y, z, rotX, rotY, rotZ);
+                }
+                
+                // Build T_disk with the extracted/interpolated data
+                Eigen::Matrix4d T_disk = buildDiskTransformFromEulerData(x, y, z, rotX, rotY, rotZ);
                 T_disks.push_back(T_disk);
-            }
-            // Axis permutation
-            for(unsigned int i = 0; i < T_disks.size(); i++)
-            {
-                Eigen::Matrix3d R = T_disks.at(i).block(0,0,3,3);
-                Eigen::Matrix3d R_new;
-                R_new.block(0,0,3,1) = R.block(0,2,3,1); // new x axis is old z axis
-                R_new.block(0,1,3,1) = R.block(0,0,3,1); // new y axis is old x axis
-                R_new.block(0,2,3,1) = R.block(0,1,3,1); // new z axis is old y axis
-                T_disks.at(i).block(0,0,3,3) = R_new;
             }
 
             // Prepare measurement for this sample
