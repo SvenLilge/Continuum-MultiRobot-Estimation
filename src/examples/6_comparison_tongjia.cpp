@@ -213,7 +213,7 @@ void exportResultsToCSV(const std::string& output_file,
 int main(int argc, char *argv[])
 {
     // Load data
-    std::string file_name = "../data/RSS2026/base 1/multiCR oscillation 2/dataVicon.csv";
+    std::string file_name = "../data/RSS2026/base 1/multiCR unknown force 6/dataVicon.csv";
     //std::string file_name = "../data/dataTongjia.csv";
     Eigen::MatrixXd data = load_csv<Eigen::MatrixXd>(file_name, true);
 
