@@ -6,9 +6,17 @@
 #include <Eigen/Core>
 #include <Eigen/SparseCholesky>
 
+// Main estimator for one or more continuum robots on SE(3).
+//
+// Workflow:
+// 1) Define RobotTopology, Hyperparameters, and Options.
+// 2) Construct estimator and provide sensor measurements.
+// 3) Call computeStateEstimate(...) to get means + uncertainties.
+// 4) Optionally query additional arclength states via interpolation.
 class ContinuumRobotStateEstimator
 {
 public:
+    // Geometric/system configuration that remains fixed during estimation.
     struct RobotTopology
     {
         struct Coupling
@@ -49,6 +57,7 @@ public:
 
     };
 
+    // Probabilistic tuning parameters (measurement and process covariances).
     // Ideally one should be able to set those individually for each cost term
     // For now, the same covariance is used for all measurements/cost term of one type
     struct Hyperparameters 
@@ -65,6 +74,7 @@ public:
         Eigen::Matrix<double,6,6> Qc;
     };
 
+    // Full estimated system state (mean + uncertainty) for all robots.
     struct SystemState
     {
         struct RobotState
@@ -110,6 +120,7 @@ public:
         std::vector<RobotState> robots;
     };
 
+    // Numerical settings that control optimizer behavior.
     struct Options
     {
          // Choice of the initial guess of the optimization problem
@@ -125,6 +136,7 @@ public:
         bool kirchhoff_rods;
     };
 
+    // One sensor input term used by the optimization.
     struct SensorMeasurement //Expressed with T_ib frames
     {
         enum Type {Pose, Strain, FBGStrain};
@@ -139,15 +151,20 @@ public:
         unsigned int idx_node; // ID of estimatation node the measurement belongs to (ignored if end-effector)
     };
 
+    // Empty constructor; configuration must be provided before estimation.
     ContinuumRobotStateEstimator();
+    // Fully configured constructor for immediate use.
     ContinuumRobotStateEstimator(RobotTopology topology, Hyperparameters parameters, Options options);
 
+    // Set/get static robot geometry and coupling configuration.
     void setRobotTopology(RobotTopology topology);
     RobotTopology getRobotTopology();
 
+    // Set/get covariance and noise tuning parameters.
     void setHyperparameters(Hyperparameters parameters);
     Hyperparameters getHyperparameters();
 
+    // Set/get solver options.
     void setOptions(Options options);
     Options getOptions();
 
@@ -160,7 +177,9 @@ public:
     //Prints the data of a particular robot node handed to the function
     void printNodeInfo(SystemState::RobotState::Node node);
 
-    //Computes the and returns state estimate given a set of sensor measurements
+    // Computes the state estimate from a batch of measurements.
+    // Returns true if optimization converged; false otherwise.
+    // cost stores the optimization objective value history per iteration.
     //Set verbose to true for additional terminal outputs (useful for debugging etc)
     bool computeStateEstimate(SystemState &state, std::vector<double> &cost, std::vector<SensorMeasurement> measurements, bool verbose_mode = false);
 
@@ -224,7 +243,14 @@ private:
     //Converts a state (only the mean values) expressed in T_ib frames to state expressed in T_bi frames and vice versa
     void convertStateMeanBodyInertial(SystemState &state);
 
-    //Prints the sparsity pattern of A
+    // Diagnostic helper for optimization debugging.
+    // Prints where the system matrix A has non-zero structure (X) vs zeros (-).
+    // This is useful to verify that factors are connected as expected:
+    // - prior terms should form banded local connections along each robot,
+    // - measurement terms should add local diagonal blocks,
+    // - coupling terms should add off-diagonal links between coupled states.
+    // Note: this is not for visualization of robot shape; it is for checking
+    // correctness and conditioning of the linear system assembly.
     void printSparsity(Eigen::MatrixXd A);
 };
 

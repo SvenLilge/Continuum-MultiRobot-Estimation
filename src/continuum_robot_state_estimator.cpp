@@ -6,12 +6,41 @@
 #include <iostream>
 #include <Eigen/LU>
 
+/*
+Implementation guide for new contributors
+-----------------------------------------
+This file solves a nonlinear MAP estimation problem for one or more continuum robots.
 
+State layout:
+- Each estimation node has 12 variables:
+  [pose increment in se(3) (6), strain (6)].
+- If a common end-effector exists, an additional 6 pose variables are appended.
+
+Objective terms:
+- Prior term: enforces smooth robot evolution between neighboring arclength nodes.
+- Coupling term: enforces kinematic constraints between robots (or robot to end-effector).
+- Measurement term: fuses pose, strain, or FBG strain observations.
+
+Numerics:
+- Each iteration linearizes all factors around current state and builds sparse normal
+  equations A * dx = b.
+- A projection matrix P removes locked or constrained DOFs (boundary conditions,
+  Kirchhoff assumptions) before solving.
+- The solved update dx is applied on SE(3) for poses and additively for strains.
+
+Frame conventions:
+- Internal optimization follows the paper derivation in T_bi convention.
+- Returned user-facing state means are converted back to T_ib convention.
+*/
+
+// Empty constructor for delayed setup via setter API.
 ContinuumRobotStateEstimator::ContinuumRobotStateEstimator()
 {
 
 }
 
+// Main constructor for one-shot configuration.
+// Validates all inputs, prepares active-DOF projection matrix, and seeds m_state.
 ContinuumRobotStateEstimator::ContinuumRobotStateEstimator(RobotTopology topology, Hyperparameters parameters, Options options)
 {
     //Asserts for inputs to make sure they are valid
@@ -100,6 +129,8 @@ void ContinuumRobotStateEstimator::validateRobotTopology(RobotTopology topology)
         validate_transformation_matrix(topology.Ti0[i]);
     }
 
+    // If the topology declares a shared end-effector, at least one coupling must
+    // explicitly reference it (idxB == N). This keeps the optimization well-defined.
     bool coupling_to_ee_exists = false;
     for(unsigned int i = 0; i < topology.robot_coupling.size(); i++)
     {
@@ -218,6 +249,10 @@ void ContinuumRobotStateEstimator::validateMeasurements(std::vector<SensorMeasur
 
 ContinuumRobotStateEstimator::SystemState ContinuumRobotStateEstimator::constructInitialGuess(Options::InitialGuessType type)
 {
+    // The initial guess strongly affects convergence speed for nonlinear problems.
+    // - Straight: deterministic rod-aligned seed.
+    // - Last: warm-start from previous estimate.
+    // - Custom: user-provided state.
 
     SystemState initial_guess;
     initial_guess.robots = {};
@@ -251,7 +286,9 @@ ContinuumRobotStateEstimator::SystemState ContinuumRobotStateEstimator::construc
                 Eigen::Matrix4d T_ik = m_robot_topology.Ti0[n]*T_0k;
                 node.pose = T_ik;
 
-                //Define strain
+                // Straight rod seed in body convention:
+                // nu = [1,0,0] and omega = [0,0,0].
+                // This corresponds to no bending/twist and unit axial stretch.
                 Eigen::Matrix<double,6,1> strain;
                 strain << 1, 0, 0, 0, 0, 0;
                 node.strain = strain;
@@ -281,6 +318,14 @@ ContinuumRobotStateEstimator::SystemState ContinuumRobotStateEstimator::construc
 
 void ContinuumRobotStateEstimator::assemblePriorTerms(std::vector<Eigen::Triplet<double> > &A_tripletList, std::vector<Eigen::Triplet<double> > &b_tripletList, double &cost, ContinuumRobotStateEstimator::SystemState state)
 {
+    // Prior factor between every neighboring node pair along each robot.
+    // This is the GP-inspired smoothness prior in SE(3), linearized at current state.
+    //
+    // For each pair (k, k+1), a 12x1 residual e is used:
+    // e = [pose-consistency (6), strain-consistency (6)].
+    // Its Jacobian contributes a 24x24 block in normal equations because two
+    // neighboring 12D states are involved.
+
     //Save total number of nodes
     int total_nodes = std::accumulate(m_robot_topology.K.begin(),m_robot_topology.K.end(),0);
 
@@ -316,7 +361,9 @@ void ContinuumRobotStateEstimator::assemblePriorTerms(std::vector<Eigen::Triplet
 
             Eigen::MatrixXd Qc_inv = invert_diagonal(m_hyperparameters.Qc);
 
-            //Compute error vector at operating point
+            // Residual at linearization point:
+            // top 6  -> pose increment consistency over arclength interval
+            // bottom 6 -> strain transition consistency
             Eigen::Matrix<double, 12,1> e;
             e << xi - delta_s*varpi_k,
                     J_inv*varpi_k1 - varpi_k;
@@ -326,7 +373,8 @@ void ContinuumRobotStateEstimator::assemblePriorTerms(std::vector<Eigen::Triplet
             F << -J_inv*T_ad, -delta_s*Eigen::Matrix<double,6,6>::Identity(), J_inv, Eigen::Matrix<double,6,6>::Zero(),
                     -0.5*curlyhat(varpi_k1)*J_inv*T_ad, -Eigen::Matrix<double,6,6>::Identity(), 0.5*curlyhat(varpi_k1)*J_inv, J_inv;
 
-            //Covariance for prior terms
+            // Information matrix of the prior block (inverse covariance).
+            // Scales with powers of delta_s as in GP prior derivation.
             Eigen::Matrix<double,12,12> Q_inv;
             Q_inv << 12/(delta_s*delta_s*delta_s)*Qc_inv, -6/(delta_s*delta_s)*Qc_inv,
                     -6/(delta_s*delta_s)*Qc_inv, 4/(delta_s)*Qc_inv;
@@ -370,6 +418,14 @@ void ContinuumRobotStateEstimator::assemblePriorTerms(std::vector<Eigen::Triplet
 
 void ContinuumRobotStateEstimator::assembleCouplingTerms(std::vector<Eigen::Triplet<double> > &A_tripletList, std::vector<Eigen::Triplet<double> > &b_tripletList, double &cost, ContinuumRobotStateEstimator::SystemState state)
 {
+    // Coupling factors enforce consistency between selected node frames.
+    // Each coupling may connect:
+    // - robot node A <-> robot node B
+    // - robot node A <-> common end-effector pose
+    //
+    // The residual is the SE(3) log of relative transform mismatch between
+    // coupling frame definitions on both sides.
+
     // Save total number of nodes
     int total_nodes = std::accumulate(m_robot_topology.K.begin(),m_robot_topology.K.end(),0);
 
@@ -408,7 +464,8 @@ void ContinuumRobotStateEstimator::assembleCouplingTerms(std::vector<Eigen::Trip
 
         Eigen::Matrix4d T_2c = coupling.T_bB_c; // Transformation from the body (node) frame to the coupling frame
 
-        // This is the current pose error in the coupling (should be identity matrix when coupling constraint is fullfilled)
+        // Current mismatch transform.
+        // If coupling is perfectly satisfied, T_cur == Identity.
         // T_c1*T_1s*T_s2*T_2c = T_cc
         Eigen::Matrix4d T_cur = invert_transformation(T_1c)*T_1s*invert_transformation(T_2s)*T_2c;
 
@@ -435,7 +492,8 @@ void ContinuumRobotStateEstimator::assembleCouplingTerms(std::vector<Eigen::Trip
 
 
 
-        //CONSIDER MASKING
+        // Apply component-wise mask to support partial couplings
+        // (e.g., position-only coupling).
         for(unsigned int i = 0; i < 6; i++)
         {
             if(coupling.mask(i,0) == 0)
@@ -615,6 +673,14 @@ void ContinuumRobotStateEstimator::assembleCouplingTerms(std::vector<Eigen::Trip
 
 void ContinuumRobotStateEstimator::assembleMeasurementTerms(std::vector<Eigen::Triplet<double> > &A_tripletList, std::vector<Eigen::Triplet<double> > &b_tripletList, double &cost, ContinuumRobotStateEstimator::SystemState state, std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements)
 {
+    // Measurement factors are local unary factors:
+    // - Pose measurement    -> acts on node pose (or end-effector pose)
+    // - Strain measurement  -> acts on node strain
+    // - FBG strain          -> nonlinear sensor model of curvature strain
+    //
+    // Each measurement contributes A_block = F' R^-1 F and b_block = -F' R^-1 e
+    // at the corresponding state indices.
+
     // Resize matrices according to robot topology
     int total_nodes = std::accumulate(m_robot_topology.K.begin(),m_robot_topology.K.end(),0);
 
@@ -691,6 +757,7 @@ void ContinuumRobotStateEstimator::assembleMeasurementTerms(std::vector<Eigen::T
                 Eigen::Matrix<double,6,1> strain_des = -measurement.value;
                 Eigen::Matrix<double,6,1> strain_cur = state.robots[measurement.idx_robot].estimation_nodes[measurement.idx_node].strain;
 
+                // Residual in strain space.
                 e = strain_des - strain_cur;
                 F << Eigen::Matrix<double,6,6>::Zero(), -Eigen::Matrix<double,6,6>::Identity();
 
@@ -715,6 +782,7 @@ void ContinuumRobotStateEstimator::assembleMeasurementTerms(std::vector<Eigen::T
                 Eigen::Matrix4d T_des = invert_transformation(measurement.value); // Invert T_des so that it is expressed as T_bi
                 Eigen::Matrix4d T_cur = state.robots[measurement.idx_robot].estimation_nodes[measurement.idx_node].pose; //Get node pose of state
 
+                // Pose residual on SE(3) tangent space.
                 e = tran_to_vec(T_cur*invert_transformation(T_des));
                 F << vec_to_jac(e).inverse(), Eigen::Matrix<double,6,6>::Zero();
 
@@ -741,6 +809,7 @@ void ContinuumRobotStateEstimator::assembleMeasurementTerms(std::vector<Eigen::T
                 Eigen::Matrix<double,6,1> curvature_strain_cur = -1*state.robots[measurement.idx_robot].estimation_nodes[measurement.idx_node].strain;
                 Eigen::Matrix<double,4,1> fbg_strain_cur = computeFBGSensorModel(curvature_strain_cur,m_robot_topology.fbg_theta_offset[measurement.idx_robot],m_robot_topology.fbg_core_distance[measurement.idx_robot]);
 
+                // FBG residual in sensor space.
                 e = fbg_strain_des - fbg_strain_cur;
                 F << Eigen::Matrix<double,4,6>::Zero(), computeFBGSensorModelDerivative(curvature_strain_cur,m_robot_topology.fbg_theta_offset[measurement.idx_robot],m_robot_topology.fbg_core_distance[measurement.idx_robot]);
 
@@ -800,6 +869,8 @@ void ContinuumRobotStateEstimator::assembleMeasurementTerms(std::vector<Eigen::T
 
 double ContinuumRobotStateEstimator::getPriorCost(ContinuumRobotStateEstimator::SystemState state)
 {
+    // Cost-only evaluation used by line-search trial steps.
+    // Mirrors assemblePriorTerms but without Jacobian/Hessian assembly.
     //Set cost to zero
     double cost = 0;
 
@@ -854,6 +925,7 @@ double ContinuumRobotStateEstimator::getPriorCost(ContinuumRobotStateEstimator::
 
 double ContinuumRobotStateEstimator::getCouplingCost(ContinuumRobotStateEstimator::SystemState state)
 {
+    // Cost-only evaluation used by line-search trial steps.
 
     //Set cost to zero
     double cost = 0;
@@ -923,6 +995,7 @@ double ContinuumRobotStateEstimator::getCouplingCost(ContinuumRobotStateEstimato
 
 double ContinuumRobotStateEstimator::getMeasurementCost(ContinuumRobotStateEstimator::SystemState state, std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements)
 {
+    // Cost-only evaluation used by line-search trial steps.
 
     //Set cost to zero
     double cost = 0;
@@ -1039,6 +1112,15 @@ double ContinuumRobotStateEstimator::getMeasurementCost(ContinuumRobotStateEstim
 
 Eigen::SparseMatrix<double> ContinuumRobotStateEstimator::constructProjectionMatrix()
 {
+    // Build P that maps active optimization variables to full state vector.
+    // This allows solving only unconstrained DOFs while still applying full-state
+    // updates afterwards via dx_full = P' * dx_active.
+    //
+    // P removes:
+    // - locked first/last pose and strain states
+    // - translational strain updates under Kirchhoff assumption
+    // and adds end-effector pose DOFs when enabled.
+
     Eigen::MatrixXd P;
     Eigen::MatrixXd Id;
     int num_cols;
@@ -1216,6 +1298,8 @@ Eigen::SparseMatrix<double> ContinuumRobotStateEstimator::constructProjectionMat
 
 Eigen::MatrixXd ContinuumRobotStateEstimator::solveLinearSystem(Eigen::SparseMatrix<double> A, Eigen::SparseMatrix<double> b, Eigen::SparseMatrix<double> P, bool initialize)
 {
+    // Solve projected normal equations in active variable space.
+    // First iteration runs analyzePattern for sparse factorization reuse.
     //Apply projection matrix
     A = P*A*P.transpose();
     b = P*b;
@@ -1236,7 +1320,7 @@ Eigen::MatrixXd ContinuumRobotStateEstimator::solveLinearSystem(Eigen::SparseMat
 
 
 
-    //Undo projection matrix
+    // Lift active-state increment back to full-state increment layout.
     dx = P.transpose()*dx;
 
     return dx;
@@ -1246,6 +1330,10 @@ Eigen::MatrixXd ContinuumRobotStateEstimator::solveLinearSystem(Eigen::SparseMat
 
 Eigen::Matrix<double,4,1> ContinuumRobotStateEstimator::computeFBGSensorModel(Eigen::Matrix<double, 6, 1> curvature_strains, double theta_offset, double core_distance)
 {
+    // FBG model:
+    // - output[0] is central core strain
+    // - output[1..3] are outer cores separated by 120 degrees
+    // The model maps curvature strain variables to measurable fiber strains.
     Eigen::Matrix<double,4,1> y;
 
     double nu_1 = curvature_strains(0);
@@ -1271,6 +1359,8 @@ Eigen::Matrix<double,4,1> ContinuumRobotStateEstimator::computeFBGSensorModel(Ei
 
 Eigen::Matrix<double,4,6> ContinuumRobotStateEstimator::computeFBGSensorModelDerivative(Eigen::Matrix<double, 6, 1> curvature_strains, double theta_offset, double core_distance)
 {
+    // Analytical Jacobian of FBG model wrt 6D strain state.
+    // Used for linearized measurement factor assembly.
     Eigen::Matrix<double,4,6> G;
 
 
@@ -1306,6 +1396,9 @@ Eigen::Matrix<double,4,6> ContinuumRobotStateEstimator::computeFBGSensorModelDer
 
 void ContinuumRobotStateEstimator::updateStateVariables(ContinuumRobotStateEstimator::SystemState &state, Eigen::MatrixXd dx)
 {
+    // Apply increment:
+    // - pose uses left-multiplicative SE(3) update
+    // - strain uses additive update
     int k_offset = 0;
     for(unsigned int n = 0; n < m_robot_topology.N; n++)
     {
@@ -1331,6 +1424,8 @@ void ContinuumRobotStateEstimator::updateStateVariables(ContinuumRobotStateEstim
 
 void ContinuumRobotStateEstimator::updateStateUncertainties(ContinuumRobotStateEstimator::SystemState &state, Eigen::SparseMatrix<double> covariance)
 {
+    // Extract per-node covariance/std from global covariance matrix and store
+    // user-friendly uncertainty fields in each node.
     int k_offset = 0;
     for(unsigned int n = 0; n < m_robot_topology.N; n++)
     {
@@ -1407,6 +1502,9 @@ void ContinuumRobotStateEstimator::updateStateUncertainties(ContinuumRobotStateE
 
 void ContinuumRobotStateEstimator::interpolateStates(ContinuumRobotStateEstimator::SystemState &state, Eigen::SparseMatrix<double> covariance)
 {
+    // GP interpolation between estimation nodes.
+    // For each interval [k, k+1], inserts M[n]-1 intermediate states plus endpoint
+    // according to topology, including interpolated covariance.
     int k_offset = 0;
     for(unsigned int n = 0; n < m_robot_topology.N; n++)
     {
@@ -1655,6 +1753,25 @@ void ContinuumRobotStateEstimator::convertStateMeanBodyInertial(ContinuumRobotSt
 
 void ContinuumRobotStateEstimator::printSparsity(Eigen::MatrixXd A)
 {
+    // Why this exists:
+    // A is the linearized normal-equation matrix used to compute each optimization step.
+    // For large systems, the most important property is often its structure (which states
+    // directly interact), not the exact numeric values.
+    //
+    // What is printed:
+    // - We inspect A in 6x6 chunks, because many state interactions are naturally grouped
+    //   in 6D pose/strain components on SE(3).
+    // - "X" means this 6x6 block has at least one non-zero entry.
+    // - "-" means the full 6x6 block is zero.
+    //
+    // Why useful:
+    // - Quickly verifies that factors were assembled at correct indices.
+    // - Helps detect disconnected states (missing constraints/measurements).
+    // - Helps explain solver behavior: sparse, banded patterns are expected and efficient.
+    //
+    // Why not redundant with VTK visualization:
+    // - Visualizer shows the estimated geometry.
+    // - This function shows internal optimizer connectivity and is a numerical debug tool.
     std::cout  << std::endl << "Sparsity pattern of A (each entry is a 6x6 block):" << std::endl;
     for(unsigned int i = 0; i < A.rows()/6; i++)
     {
@@ -1759,13 +1876,20 @@ void ContinuumRobotStateEstimator::printNodeInfo(ContinuumRobotStateEstimator::S
 
 bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std::vector<double> &cost, std::vector<SensorMeasurement> measurements, bool verbose_mode)
 {
+    // High-level flow:
+    // 1) validate and initialize
+    // 2) iterative nonlinear optimization (Gauss-Newton/Newton-like)
+    // 3) recover covariance and interpolated states
+    // 4) convert means back to user-facing frame convention
+
     // Asserts for inputs to make sure they are valid
     validateMeasurements(measurements);
 
     // Setup the initial guess depending on chosen option
     SystemState current_state = constructInitialGuess(m_options.init_guess_type);
 
-    // Convert the state to be expressed with T_bi frames
+    // Convert to internal convention used by the derivation.
+    // All residual/Jacobian math below assumes T_bi.
     // This is necessary as all of our derivations throughout the paper are based on this convention
     convertStateMeanBodyInertial(current_state);
 
@@ -1792,7 +1916,7 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
     std::vector<Eigen::Triplet<double>> A_tripletList;
     std::vector<Eigen::Triplet<double>> b_tripletList;
 
-    // Solve the system iteratively
+    // Solve nonlinear system iteratively by repeatedly linearizing around current_state.
     bool max_iter = false;
     for(unsigned int iter = 0; iter < m_options.max_optimization_iterations; iter++)
     {
@@ -1818,7 +1942,7 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
 
 
 
-        //Add terms together
+        // Assemble sparse normal equations from all factor contributions.
         A.setFromTriplets(A_tripletList.begin(), A_tripletList.end());
         b.setFromTriplets(b_tripletList.begin(), b_tripletList.end());
 
@@ -1840,7 +1964,7 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
             std::cout << std::endl;
         }
 
-        // Solve for dx
+        // Solve linearized update A * dx = b in active variable space.
         bool initialize = false;
         if(iter == 0)
         {
@@ -1849,13 +1973,16 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
 
         Eigen::MatrixXd dx = solveLinearSystem(A,b,m_P, initialize);
 
+        // Search direction p; for this solver p == dx.
         Eigen::MatrixXd p = dx;
         double m;
+        // m is proportional to expected local decrease and is reused by line-search
+        // acceptance and convergence logic.
         m = (-dx.transpose()*p)(0,0);
         double alpha = 1;
 
 
-        // Update the state variables
+        // Update state with either full Newton step or backtracked step.
         if(m_options.solver == Options::Solver::NewtonLineSearch) //Do linesearch if selected
         {
             SystemState state_check;
@@ -1867,6 +1994,8 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
             int ls_iter = 0;
             int max_ls_iter = 10;
 
+            // Backtracking line-search (Armijo-like condition).
+            // Reduces alpha until a sufficient decrease is found or max tries reached.
             do// As long as the cost of the next step are larger than the current cost
             {
                 //Reset state_check to current state
@@ -1878,7 +2007,7 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
                 //Apply current step to state_check
                 updateStateVariables(state_check,step);
 
-                //Compute the cost for the new state
+                // Evaluate full nonlinear objective at trial state.
                 new_cost = getPriorCost(state_check) + getMeasurementCost(state_check,measurements) + getCouplingCost(state_check);
                 
                 alpha = tau*alpha; //Half the step to make for next iteration
@@ -1889,7 +2018,7 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
 
             } while((new_cost > (cost.back() + m*c*alpha) || std::isnan(new_cost)) && ls_iter < max_ls_iter);
 
-            //Set the current state to the state that minimzed the cost
+            // Accept best trial from line-search.
             current_state = state_check;
 
         }
@@ -1900,7 +2029,8 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
 
 
 
-        //Check if the cost during the last couple iterations are still changing
+        // Convergence check based on step magnitude proxy.
+        // If expected improvement is below threshold, stop iterating.
         bool detect_convergence = false;
 
         if(m > -1*m_options.convergence_threshold)
@@ -1928,7 +2058,9 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
     }
 
 
-    // Extract covariances and uncertainties and update state
+    // Recover full covariance at optimum:
+    // covariance = (A_full)^-1, where A_full is projected-system information matrix.
+    // This is then unpacked into per-node covariance/std fields.
     Eigen::SparseMatrix<double> tmp_covariance = m_P*A*m_P.transpose();
     Eigen::SparseMatrix<double> Identity(tmp_covariance.rows(), tmp_covariance.cols());
     Identity.setIdentity();
@@ -1939,14 +2071,14 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
     m_covariance = m_P.transpose()*tmp_covariance_inv*m_P; //Save the covariance of the estimate at the final iteration
     updateStateUncertainties(current_state, m_covariance);
 
-    //Fill in the interpolation nodes between the estimation nodes
+    // Fill interpolation nodes so visualization and downstream logic can query dense shape.
     interpolateStates(current_state, m_covariance);
 
 
     //Convert the state mean back to inertial frame (more intuitive to work with)
     convertStateMeanBodyInertial(current_state);
 
-    // Set member variable m_state and return it
+    // Persist and return final estimate.
     m_state = current_state;
     state = current_state;
 
@@ -1962,6 +2094,10 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
 //  Need to solve for state estimate before calling this function
 void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEstimator::SystemState &state, std::vector<std::pair<unsigned int, double>> arclengths)
 {
+    // Query API for arbitrary arclength samples after an estimate exists.
+    // Reuses the same GP interpolation machinery as interpolateStates(), but only
+    // at requested coordinates instead of full uniform sampling.
+
     state = m_state;
 
 
@@ -1969,7 +2105,7 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
     //Convert state to body frames (our equations are written that way)
     convertStateMeanBodyInertial(state);
 
-    //Sorts pairs in increasing order of their first value (or second value if first value is the same)
+    // Sort queries so output nodes are grouped and ordered by robot/arclength.
     std::sort(arclengths.begin(), arclengths.end());
 
     for(unsigned int i = 0; i < arclengths.size(); i++)
@@ -1985,7 +2121,7 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
         SystemState::RobotState::Node node;
         node.arclength = arclength;
 
-        //Get the estimation node before and after the interpolated node
+        // Locate interval [k, k+1] that contains requested arclength.
         SystemState::RobotState::Node node_k;
         SystemState::RobotState::Node node_k1;
         int k_idx = 0;
@@ -2005,7 +2141,7 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
 
         }
 
-        //Interpolate between the found nodes
+        // Interpolate mean and covariance at requested arclength inside this interval.
 
         //Get pose of current and next node
         Eigen::Matrix4d T_k = node_k.pose;
@@ -2194,5 +2330,3 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
     m_state = state;
 
 }
-
-
