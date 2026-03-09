@@ -1,0 +1,131 @@
+# Configuration for Example 3: Continuous Stewart-Gough Platform
+# Six continuum robot legs arranged in a circular pattern.
+# Ti0 and coupling transforms are pre-computed from:
+#   radius = 0.03, init_offset = 30 deg, offset_two_legs = 30 deg
+
+topology:
+  N: 6
+  K: [15, 15, 15, 15, 15, 15]
+  M: [2, 2, 2, 2, 2, 2]
+  L: [0.15, 0.15, 0.15, 0.15, 0.15, 0.15]
+
+  lock_first_pose:   [true, true, true, true, true, true]
+  lock_last_pose:    [false, false, false, false, false, false]
+  lock_first_strain: [false, false, false, false, false, false]
+  lock_last_strain:  [false, false, false, false, false, false]
+
+  fbg_theta_offset:  [0, 0, 0, 0, 0, 0]
+  fbg_core_distance: [0, 0, 0, 0, 0, 0]
+
+  common_end_effector: true
+
+  # Base frames (circular layout, pre-computed)
+  Ti0:
+    - type: translation
+      xyz: [0, 0.028977774788672, 0.007764571353076]
+    - type: translation
+      xyz: [0, 0.021213203435596, 0.021213203435596]
+    - type: translation
+      xyz: [0, -0.021213203435596, 0.021213203435596]
+    - type: translation
+      xyz: [0, -0.028977774788672, 0.007764571353076]
+    - type: translation
+      xyz: [0, -0.007764571353076, -0.028977774788672]
+    - type: translation
+      xyz: [0, 0.007764571353076, -0.028977774788672]
+
+  robot_coupling:
+    # All 6 robots coupled to common end-effector (idx 6)
+    - idxA: 0
+      idxB: 6
+      coupling_node_robot_A: 14    # K[0]-1
+      coupling_node_robot_B: 0
+      T_bA_c: { type: identity }
+      T_bB_c:
+        type: translation
+        xyz: [0, 0.007764571353076, -0.028977774788672]
+      mask: [1, 1, 1, 0, 1, 1]    # No x-rotation constraint
+
+    - idxA: 1
+      idxB: 6
+      coupling_node_robot_A: 14
+      coupling_node_robot_B: 0
+      T_bA_c: { type: identity }
+      T_bB_c:
+        type: translation
+        xyz: [0, 0.028977774788672, 0.007764571353076]
+      mask: [1, 1, 1, 0, 1, 1]
+
+    - idxA: 2
+      idxB: 6
+      coupling_node_robot_A: 14
+      coupling_node_robot_B: 0
+      T_bA_c: { type: identity }
+      T_bB_c:
+        type: translation
+        xyz: [0, 0.021213203435596, 0.021213203435596]
+      mask: [1, 1, 1, 0, 1, 1]
+
+    - idxA: 3
+      idxB: 6
+      coupling_node_robot_A: 14
+      coupling_node_robot_B: 0
+      T_bA_c: { type: identity }
+      T_bB_c:
+        type: translation
+        xyz: [0, -0.021213203435596, 0.021213203435596]
+      mask: [1, 1, 1, 0, 1, 1]
+
+    - idxA: 4
+      idxB: 6
+      coupling_node_robot_A: 14
+      coupling_node_robot_B: 0
+      T_bA_c: { type: identity }
+      T_bB_c:
+        type: translation
+        xyz: [0, -0.028977774788672, 0.007764571353076]
+      mask: [1, 1, 1, 0, 1, 1]
+
+    - idxA: 5
+      idxB: 6
+      coupling_node_robot_A: 14
+      coupling_node_robot_B: 0
+      T_bA_c: { type: identity }
+      T_bB_c:
+        type: translation
+        xyz: [0, -0.007764571353076, -0.028977774788672]
+      mask: [1, 1, 1, 0, 1, 1]
+
+hyperparameters:
+  noise_std:
+    R_p: 0.002
+    R_o: 0.05
+    R_v: 0.05
+    R_u: 0.05
+    R_fbg: 1.0e-5
+
+  R_pose_scale: 10.0
+  R_strain_scale: 10.0
+  R_fbg_strain_scale: 20.0
+  R_coupling_scale: 0.5e-6
+  R_coupling_diagonal: [1, 1, 1, 1, 1, 1]
+  Qc_scale: 0.5
+  Qc_diagonal: [1.0, 1.0, 1.0, 100.0, 100.0, 100.0]
+
+options:
+  initial_guess: Straight
+  solver: NewtonLineSearch
+  max_iterations: 200
+  convergence_threshold: 50.0
+  kirchhoff_rods: true
+
+# No measurements for this example
+measurements: []
+
+visualization:
+  window_width: 1280
+  window_height: 720
+  render_frames: true
+  render_covariance: true
+  covariance_n_std: 3
+  verbose: true

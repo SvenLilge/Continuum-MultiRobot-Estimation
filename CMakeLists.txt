@@ -12,6 +12,9 @@ find_package(VTK REQUIRED)
 #Eigen
 find_package (Eigen3 REQUIRED NO_MODULE)
 
+#yaml-cpp
+find_package(yaml-cpp REQUIRED)
+
 #include directories
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_SOURCE_DIR}/src)
@@ -29,11 +32,11 @@ add_executable(4_collaborative_continuum_robots src/examples/4_collaborative_con
 add_executable(5_fbg_measurements src/examples/5_fbg_measurements.cpp ${H_FILES} ${CPP_FILES})
 
 # Link the necessary libraries
-target_link_libraries(1_continuum_robot ${VTK_LIBRARIES} Eigen3::Eigen)
-target_link_libraries(2_parallel_continuum_robot ${VTK_LIBRARIES} Eigen3::Eigen)
-target_link_libraries(3_continuous_stewart_gough ${VTK_LIBRARIES} Eigen3::Eigen)
-target_link_libraries(4_collaborative_continuum_robots ${VTK_LIBRARIES} Eigen3::Eigen)
-target_link_libraries(5_fbg_measurements ${VTK_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(1_continuum_robot ${VTK_LIBRARIES} Eigen3::Eigen yaml-cpp::yaml-cpp)
+target_link_libraries(2_parallel_continuum_robot ${VTK_LIBRARIES} Eigen3::Eigen yaml-cpp::yaml-cpp)
+target_link_libraries(3_continuous_stewart_gough ${VTK_LIBRARIES} Eigen3::Eigen yaml-cpp::yaml-cpp)
+target_link_libraries(4_collaborative_continuum_robots ${VTK_LIBRARIES} Eigen3::Eigen yaml-cpp::yaml-cpp)
+target_link_libraries(5_fbg_measurements ${VTK_LIBRARIES} Eigen3::Eigen yaml-cpp::yaml-cpp)
 
 # Set the output directory for the executable
 set_target_properties(1_continuum_robot PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)

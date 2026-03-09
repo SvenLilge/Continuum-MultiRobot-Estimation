@@ -1,0 +1,72 @@
+# Configuration for Example 1: Single Continuum Robot
+# Edit parameters here and re-run the executable — no recompilation needed.
+
+topology:
+  N: 1                          # Number of robots
+  K: [21]                       # Estimation nodes per robot
+  M: [2]                        # Interpolation nodes between estimation nodes (1 = no interpolation)
+  L: [0.20]                     # Robot lengths in meters
+
+  lock_first_pose: [true]
+  lock_last_pose: [false]
+  lock_first_strain: [false]
+  lock_last_strain: [false]
+
+  fbg_theta_offset: [0]
+  fbg_core_distance: [0]
+
+  common_end_effector: false
+
+  # Base frames for each robot (T_i0)
+  Ti0:
+    - type: identity
+
+  robot_coupling: []
+
+hyperparameters:
+  # Measurement noise standard deviations
+  noise_std:
+    R_p: 0.002                  # Position noise std dev
+    R_o: 0.05                   # Orientation noise std dev
+    R_v: 0.2                    # Translational strain noise std dev
+    R_u: 0.2                    # Rotational strain noise std dev
+    R_fbg: 1.0e-5               # FBG sensor noise std dev
+
+  # Scale factors applied to diagonal covariance matrices
+  R_pose_scale: 2.0
+  R_strain_scale: 10.0
+  R_fbg_strain_scale: 20.0
+  R_coupling_scale: 1.0e-10
+  R_coupling_diagonal: [1, 1, 1, 1, 1, 1]
+  Qc_scale: 4.0
+  Qc_diagonal: [0.1, 0.1, 0.1, 1.0, 1.0, 1.0]
+
+options:
+  initial_guess: Straight       # Straight | Last | Custom
+  solver: Newton                # Newton | NewtonLineSearch
+  max_iterations: 200
+  convergence_threshold: 0.5
+  kirchhoff_rods: true
+
+measurements:
+  # Strain measurements for first half of robot
+  - type: Strain
+    idx_robot: 0
+    idx_node_range: [0, 10]
+    mask: [1, 1, 1, 1, 1, 1]
+    value: [1, 0, 0, 0, 10, 0]
+
+  # Strain measurements for second half of robot
+  - type: Strain
+    idx_robot: 0
+    idx_node_range: [11, 20]
+    mask: [1, 1, 1, 1, 1, 1]
+    value: [1, 0, 0, 0, -10, 0]
+
+visualization:
+  window_width: 1280
+  window_height: 720
+  render_frames: true
+  render_covariance: true
+  covariance_n_std: 3
+  verbose: true
