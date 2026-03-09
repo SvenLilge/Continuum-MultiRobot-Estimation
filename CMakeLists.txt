@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 project(continuum-multirobot-estimation)
 
@@ -44,3 +45,26 @@ set_target_properties(2_parallel_continuum_robot PROPERTIES RUNTIME_OUTPUT_DIREC
 set_target_properties(3_continuous_stewart_gough PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
 set_target_properties(4_collaborative_continuum_robots PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
 set_target_properties(5_fbg_measurements PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
+
+# ── Automated tests (no VTK / no GUI) ────────────────────────────────────────
+
+# T1: ConfigLoader unit tests — only needs yaml-cpp + Eigen
+add_executable(test_config_loader
+    src/tests/test_config_loader.cpp
+    ${H_FILES}
+    src/config_loader.cpp
+    src/utilities.cpp
+)
+target_link_libraries(test_config_loader Eigen3::Eigen yaml-cpp::yaml-cpp)
+set_target_properties(test_config_loader PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
+
+# T2: Estimation integration tests — needs estimator but NOT VTK
+add_executable(test_estimation
+    src/tests/test_estimation.cpp
+    ${H_FILES}
+    src/continuum_robot_state_estimator.cpp
+    src/config_loader.cpp
+    src/utilities.cpp
+)
+target_link_libraries(test_estimation Eigen3::Eigen yaml-cpp::yaml-cpp)
+set_target_properties(test_estimation PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)

@@ -58,6 +58,19 @@ By default each executable loads its corresponding file from `../config/`. You c
 
 	./1_continuum_robot path/to/my_config.yaml
 
+### Running the Tests
+
+Two automated test executables are included. They do not require a display (no VTK window):
+
+	cd examples
+
+	./test_config_loader        # ConfigLoader unit tests (45 assertions)
+	./test_estimation           # Estimation integration tests (46 assertions)
+
+Both accept an optional argument to override the project root path (default: `..`):
+
+	./test_config_loader /path/to/project
+
 ### Modifying Simulation Parameters (No Recompilation)
 
 All simulation parameters live in the `config/` folder. To change a parameter:
