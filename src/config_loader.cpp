@@ -499,6 +499,8 @@ void ConfigLoader::parseMeasurements(const void* ptr)
 
             Eigen::Matrix<int,6,1> mask;
             auto mask_vec = mj["mask"].as<std::vector<int>>();
+            if (mask_vec.size() != 6)
+                throw std::runtime_error("Measurement mask must have 6 elements");
             for (int j = 0; j < 6; j++) mask(j) = mask_vec[j];
 
             Eigen::MatrixXd data = load_csv<Eigen::MatrixXd>(path);
@@ -534,6 +536,8 @@ void ConfigLoader::parseMeasurements(const void* ptr)
         unsigned int idx_robot = mj["idx_robot"].as<unsigned int>();
         Eigen::Matrix<int,6,1> mask;
         auto mask_vec = mj["mask"].as<std::vector<int>>();
+        if (mask_vec.size() != 6)
+            throw std::runtime_error("Measurement mask must have 6 elements");
         for (int j = 0; j < 6; j++) mask(j) = mask_vec[j];
 
         // Create one SensorMeasurement struct per node in the range.
