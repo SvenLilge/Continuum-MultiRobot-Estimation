@@ -12,9 +12,9 @@ IEEE Transactions on Robotics 2024
 
 The C++ implementation requires the following libraries:
 
-- [Eigen Library](http://eigen.tuxfamily.org/index.php?title=Main_Page) — matrix arithmetic
-- [Visualization Toolkit (VTK)](https://vtk.org/) — 3D rendering
-- [yaml-cpp](https://github.com/jbeder/yaml-cpp) — runtime configuration file parsing
+- [Eigen Library](http://eigen.tuxfamily.org/index.php?title=Main_Page) - matrix arithmetic
+- [Visualization Toolkit (VTK)](https://vtk.org/) - 3D rendering
+- [yaml-cpp](https://github.com/jbeder/yaml-cpp) - runtime configuration file parsing
 
 On macOS with Homebrew:
 
@@ -77,14 +77,14 @@ All simulation parameters live in the `config/` folder. To change a parameter:
 
 1. Open the corresponding YAML file, e.g. `config/1_continuum_robot.yaml`
 2. Edit the desired parameter
-3. Re-run the executable — no recompilation needed
+3. Re-run the executable - no recompilation needed
 
 Example: change the position noise in example 1:
 
 	# config/1_continuum_robot.yaml
 	hyperparameters:
 	  noise_std:
-	    R_p: 0.005   # was 0.002 — increase position noise
+	    R_p: 0.005   # was 0.002 - increase position noise
 
 Then simply run:
 
@@ -94,7 +94,7 @@ Then simply run:
 
 Each YAML config file has four main sections:
 
-**`topology`** — robot geometry and structure
+**`topology`** - robot geometry and structure
 - `N`: number of robots
 - `K`: estimation nodes per robot
 - `M`: interpolation nodes between estimation nodes (1 = no interpolation)
@@ -103,21 +103,21 @@ Each YAML config file has four main sections:
 - `robot_coupling`: coupling constraints between robots or to a common end-effector
 - boundary condition flags: `lock_first_pose`, `lock_last_pose`, `lock_first_strain`, `lock_last_strain`
 
-**`hyperparameters`** — probabilistic tuning (covariance matrices)
+**`hyperparameters`** - probabilistic tuning (covariance matrices)
 - `noise_std`: measurement noise standard deviations (`R_p`, `R_o`, `R_v`, `R_u`, `R_fbg`)
 - `R_pose_scale`, `R_strain_scale`, etc.: scale factors applied to each covariance matrix
 - `Qc_diagonal`: process noise diagonal (controls stiffness of the prior)
 
-**`options`** — solver settings
+**`options`** - solver settings
 - `solver`: `Newton` or `NewtonLineSearch`
 - `initial_guess`: `Straight`, `Last`, or `Custom`
 - `max_iterations`, `convergence_threshold`, `kirchhoff_rods`
 
-**`measurements`** — sensor inputs
+**`measurements`** - sensor inputs
 - `type`: `Strain`, `Pose`, or `FBGStrain`
 - single node, node range (`idx_node_range`), or loaded from CSV (`source: csv_file`)
 
-**`visualization`** — rendering settings
+**`visualization`** - rendering settings
 - `window_width`, `window_height`, `render_frames`, `render_covariance`, `covariance_n_std`, `verbose`
 
 ### Examples Overview
