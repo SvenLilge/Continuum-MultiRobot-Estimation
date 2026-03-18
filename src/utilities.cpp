@@ -581,4 +581,9 @@ Eigen::MatrixXd invert_diagonal(Eigen::MatrixXd matrix)
     return matrix_inv;
 }
 
+Eigen::MatrixXd lie_bracket(const Eigen::MatrixXd &A, const Eigen::MatrixXd &B)
+{
+    return A*B - B*A;
+}
+
 

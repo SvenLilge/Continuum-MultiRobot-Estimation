@@ -51,6 +51,9 @@ public:
     // Optional list of sensor measurements defined in the YAML file
     std::vector<ContinuumRobotStateEstimator::SensorMeasurement> getMeasurements() const;
 
+    // Optional list of control inputs defined in the YAML file
+    std::vector<ContinuumRobotStateEstimator::ControlInput> getControlInputs() const;
+
     // Optional visualization / rendering settings
     VisualizationSettings getVisualizationSettings() const;
 
@@ -67,6 +70,7 @@ private:
     ContinuumRobotStateEstimator::Hyperparameters m_hyperparameters;
     ContinuumRobotStateEstimator::Options         m_options;
     std::vector<ContinuumRobotStateEstimator::SensorMeasurement> m_measurements;
+    std::vector<ContinuumRobotStateEstimator::ControlInput> m_control_inputs;
     VisualizationSettings m_vis_settings;
 
     // Internal parse methods
@@ -78,6 +82,7 @@ private:
     void parseHyperparameters (const void* node);
     void parseOptions         (const void* node);
     void parseMeasurements    (const void* node);
+    void parseControlInputs   (const void* node);
     void parseVisualization   (const void* node);
 
     // Parses a 4x4 homogeneous transform from a YAML node.

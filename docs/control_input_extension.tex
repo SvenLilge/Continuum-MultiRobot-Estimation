@@ -1,0 +1,544 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── packages ──────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{mathtools}
+\usepackage{cleveref}
+
+% ── macros ────────────────────────────────────────────────────────────────
+\newcommand{\se}{\mathfrak{se}(3)}
+\newcommand{\SO}{\mathrm{SO}(3)}
+\newcommand{\SE}{\mathrm{SE}(3)}
+\newcommand{\Ad}{\mathrm{Ad}}
+\newcommand{\ad}{\mathrm{ad}}
+\newcommand{\Jac}{\mathcal{J}}
+\newcommand{\curly}[1]{\mathcal{S}\!\left(#1\right)}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\inv}{^{-1}}
+\newcommand{\T}{\mathbf{T}}
+\newcommand{\bxi}{\bm{\xi}}
+\newcommand{\bvarpi}{\bm{\varpi}}
+\newcommand{\bgamma}{\bm{\gamma}}
+\newcommand{\bPhi}{\bm{\Phi}}
+\newcommand{\be}{\mathbf{e}}
+\newcommand{\bF}{\mathbf{F}}
+\newcommand{\bA}{\mathbf{A}}
+\newcommand{\bB}{\mathbf{B}}
+\newcommand{\bC}{\mathbf{C}}
+\newcommand{\bD}{\mathbf{D}}
+\newcommand{\bQ}{\mathbf{Q}}
+\newcommand{\bL}{\mathbf{L}}
+\newcommand{\bI}{\mathbf{I}}
+\newcommand{\bzero}{\mathbf{0}}
+\DeclareMathOperator{\diag}{diag}
+
+\title{Extending the Multi-Robot Continuum State Estimator\\
+with General Transition Functions and Control Inputs}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document provides a detailed mathematical description of the extensions made to the multi-robot continuum state estimator of~\cite{lilge2022multi} (arXiv: 2210.14842) to incorporate general transition functions and control inputs, following the formulation of~\cite{lilge2024pcr} (arXiv: 2408.01333).
+The original estimator hardcodes the White-Noise-on-Acceleration (WNOA) Gaussian process prior, which assumes a linear, time-invariant (LTI) transition function and analytically known covariance.
+The extension replaces these closed-form WNOA expressions with configurable, input-dependent transition functions $\bPhi$, transition integrals $\bPhi_{\mathrm{int}}$, and covariance matrices $\bQ$ that are computed via the Magnus expansion on $\SE$.
+This generalisation affects four core components of the estimator: the prior factor assembly, the prior cost evaluation, the GP interpolation scheme, and the initial-guess construction.
+\end{abstract}
+
+%==========================================================================
+\section{Background: State Representation and Estimation Problem}
+\label{sec:background}
+%==========================================================================
+
+\subsection{State at Each Node}
+Consider $N$ continuum robots, each discretised into $K_n$ estimation nodes along arclength~$s$.
+At each node~$k$ of robot~$n$, the state consists of:
+\begin{itemize}
+    \item A homogeneous transformation $\T_{b_k i} \in \SE$ relating the body frame at node~$k$ to the inertial frame.
+    \item A generalised strain vector $\bvarpi_k \in \R^6$ combining translational strains $\bm{\nu}$ and rotational strains (curvatures) $\bm{\omega}$.
+\end{itemize}
+
+The optimisation operates internally in the body-to-inertial convention $\T_{b_k i}$.
+The local state increment between nodes $k$ and $k{+}1$ is captured by
+\begin{equation}
+    \bxi_{k,k+1} = \ln\!\bigl(\T_{b_{k+1} i}\,\T_{b_k i}\inv\bigr)^\vee \in \R^6,
+\end{equation}
+and the compound 12-dimensional local state at node~$k$ is defined as
+\begin{equation}
+    \bgamma_k = \begin{pmatrix} \bzero_{6\times 1} \\ \bvarpi_k \end{pmatrix}, \qquad
+    \bgamma_{k+1} = \begin{pmatrix} \bxi_{k,k+1} \\ \Jac\inv(\bxi_{k,k+1})\,\bvarpi_{k+1} \end{pmatrix},
+\end{equation}
+where $\Jac\inv(\bxi)$ is the inverse of the left Jacobian of $\SE$ evaluated at $\bxi$.
+
+\subsection{MAP Estimation Problem}
+The estimator solves a maximum a posteriori (MAP) problem by iteratively linearising a nonlinear least-squares objective:
+\begin{equation}
+    \min_{\mathbf{x}} \;\; \underbrace{\sum_{\text{prior}} \tfrac{1}{2}\,\be_p^\top \bQ\inv \be_p}_{\text{smoothness}} \;+\; \underbrace{\sum_{\text{coupling}} \tfrac{1}{2}\,\be_c^\top \mathbf{R}_c\inv \be_c}_{\text{kinematic constraints}} \;+\; \underbrace{\sum_{\text{meas.}} \tfrac{1}{2}\,\be_m^\top \mathbf{R}_m\inv \be_m}_{\text{observations}},
+    \label{eq:map}
+\end{equation}
+where $\mathbf{x}$ collects all node states and (optionally) a common end-effector pose.
+Each iteration assembles the Gauss-Newton normal equations
+$\mathbf{H}\,\delta\mathbf{x} = \mathbf{g}$
+and applies a state update (optionally with backtracking line search).
+
+%==========================================================================
+\section{Original Formulation: Hardcoded WNOA Prior}
+\label{sec:original}
+%==========================================================================
+
+The original estimator~\cite{lilge2022multi} uses the White-Noise-on-Acceleration (WNOA) Gaussian process prior on $\SE$.
+This models the arclength evolution of the robot backbone as a second-order stochastic differential equation driven by white noise in the strain-rate space.
+
+\subsection{WNOA Transition Function}
+\label{sec:wnoa-phi}
+The WNOA transition function over an arclength interval $\Delta s = s_{k+1} - s_k$ is the linear, time-invariant (LTI) matrix:
+\begin{equation}
+    \bPhi_{\mathrm{WNOA}}(\Delta s) = \begin{pmatrix} \bI_6 & \Delta s\,\bI_6 \\ \bzero_6 & \bI_6 \end{pmatrix} \in \R^{12 \times 12}.
+    \label{eq:phi-wnoa}
+\end{equation}
+
+\subsection{WNOA Inverse Covariance}
+\label{sec:wnoa-qinv}
+The corresponding inverse covariance (information) matrix is the analytically known block matrix:
+\begin{equation}
+    \bQ_{\mathrm{WNOA}}\inv(\Delta s) = \begin{pmatrix}
+        \dfrac{12}{\Delta s^3}\,\bQ_c\inv & -\dfrac{6}{\Delta s^2}\,\bQ_c\inv \\[8pt]
+        -\dfrac{6}{\Delta s^2}\,\bQ_c\inv & \dfrac{4}{\Delta s}\,\bQ_c\inv
+    \end{pmatrix} \in \R^{12 \times 12},
+    \label{eq:qinv-wnoa}
+\end{equation}
+where $\bQ_c \in \R^{6 \times 6}$ is the continuous-time power spectral density of the strain-driving noise.
+There is no transition integral term: $\bPhi_{\mathrm{int}} = \bzero_{12 \times 1}$.
+
+\subsection{WNOA Prior Residual and Jacobian}
+\label{sec:wnoa-prior}
+The prior residual between nodes $k$ and $k{+}1$ is:
+\begin{equation}
+    \be_{\mathrm{WNOA}} = \begin{pmatrix} \bxi_{k,k+1} - \Delta s\,\bvarpi_k \\ \Jac\inv(\bxi_{k,k+1})\,\bvarpi_{k+1} - \bvarpi_k \end{pmatrix} \in \R^{12}.
+    \label{eq:e-wnoa}
+\end{equation}
+Note that this is exactly $\bgamma_{k+1} - \bPhi_{\mathrm{WNOA}}\,\bgamma_k$.
+
+The Jacobian $\bF \in \R^{12 \times 24}$ with respect to the stacked state $(\bgamma_k, \bgamma_{k+1})$ is:
+\begin{equation}
+    \bF_{\mathrm{WNOA}} = \begin{pmatrix}
+        -\Jac\inv \Ad & -\Delta s\,\bI_6 & \Jac\inv & \bzero_6 \\
+        -\tfrac{1}{2}\curly{\bvarpi_{k+1}}\Jac\inv \Ad & -\bI_6 & \tfrac{1}{2}\curly{\bvarpi_{k+1}}\Jac\inv & \Jac\inv
+    \end{pmatrix},
+    \label{eq:F-wnoa}
+\end{equation}
+where $\Ad = \Ad(\T_{b_{k+1}i}\,\T_{b_k i}\inv)$, $\Jac\inv = \Jac\inv(\bxi_{k,k+1})$, and $\curly{\cdot}$ denotes the curly-hat operator.
+
+\subsection{WNOA GP Interpolation}
+\label{sec:wnoa-interp}
+Interpolation between estimation nodes uses the GP conditional mean.
+For a query arclength $s_q \in (s_k, s_{k+1})$ with $\Delta s_q = s_q - s_k$, the WNOA interpolation matrices are:
+\begin{align}
+    \bQ(s_q) &= \begin{pmatrix} \frac{\Delta s_q^3}{3}\bQ_c & \frac{\Delta s_q^2}{2}\bQ_c \\ \frac{\Delta s_q^2}{2}\bQ_c & \Delta s_q\,\bQ_c \end{pmatrix}, \label{eq:Q-interp-wnoa}\\[4pt]
+    \bPhi(s_q, s_{k+1}) &= \begin{pmatrix} \bI_6 & (s_{k+1}-s_q)\bI_6 \\ \bzero_6 & \bI_6 \end{pmatrix}, \label{eq:phi-partial-wnoa}\\[4pt]
+    \bPhi(s_k, s_q) &= \begin{pmatrix} \bI_6 & \Delta s_q\,\bI_6 \\ \bzero_6 & \bI_6 \end{pmatrix}. \label{eq:lambda-wnoa}
+\end{align}
+The GP interpolation coefficients are then:
+\begin{equation}
+    \bm{\Psi} = \bQ(s_q)\,\bPhi(s_q, s_{k+1})^\top\,\bQ_{\mathrm{WNOA}}\inv, \qquad
+    \bm{\Lambda} = \bPhi(s_k, s_q) - \bm{\Psi}\,\bPhi_{\mathrm{WNOA}},
+\end{equation}
+and the interpolated state is:
+\begin{equation}
+    \bgamma_q = \bm{\Lambda}\,\bgamma_k + \bm{\Psi}\,\bgamma_{k+1}.
+    \label{eq:interp-wnoa}
+\end{equation}
+
+%==========================================================================
+\section{Extended Formulation: General Transition Functions}
+\label{sec:extended}
+%==========================================================================
+
+The extension replaces the hardcoded WNOA expressions with configurable transition functions parameterised by a \emph{control input} $\mathbf{u}(s)$ on each segment.
+The control input is a 12-dimensional vector
+\begin{equation}
+    \mathbf{u}(s) = \begin{pmatrix} \bm{\nu}_u(s) \\ \bm{\omega}_u(s) \\ \dot{\bm{\nu}}_u(s) \\ \dot{\bm{\omega}}_u(s) \end{pmatrix} \in \R^{12},
+\end{equation}
+combining velocity (strain) and acceleration components in $\se$.
+Three control input types are supported:
+
+\begin{description}
+    \item[\texttt{None}] No control input. The standard WNOA prior is recovered.
+    \item[\texttt{Constant}] The control input $\mathbf{u}_0$ is constant over the segment $[s_k, s_{k+1}]$.
+    \item[\texttt{PiecewiseLinear}] The control input varies linearly between $P$ waypoints $\mathbf{u}_0, \mathbf{u}_1, \ldots, \mathbf{u}_{P-1}$, defining $P{-}1$ subsegments within each estimation interval.
+\end{description}
+
+%--------------------------------------------------------------------------
+\subsection{General Transition Function \texorpdfstring{$\bPhi$}{Phi}}
+\label{sec:general-phi}
+%--------------------------------------------------------------------------
+
+\subsubsection{Type: None (WNOA Recovery)}
+When no control input is present, the transition function reduces to the WNOA form~\eqref{eq:phi-wnoa}:
+\begin{equation}
+    \bPhi_{\texttt{None}}(\Delta s) = \begin{pmatrix} \bI_6 & \Delta s\,\bI_6 \\ \bzero_6 & \bI_6 \end{pmatrix}.
+\end{equation}
+
+\subsubsection{Type: Constant}
+\label{sec:phi-constant}
+Given a constant control input $\mathbf{u}_0 \in \R^{12}$, define the \emph{system matrix}
+\begin{equation}
+    \bA = \begin{pmatrix} \tfrac{1}{2}\curly{\mathbf{v}} & \bI_6 \\ \tfrac{1}{2}\curly{\mathbf{a}} & -\tfrac{1}{2}\curly{\mathbf{v}} \end{pmatrix} \in \R^{12 \times 12},
+    \label{eq:A-constant}
+\end{equation}
+where $\mathbf{v} = -\mathbf{u}_0^{[1:6]}$ (velocity) and $\mathbf{a} = -\mathbf{u}_0^{[7:12]}$ (acceleration), and $\curly{\cdot}$ is the $6{\times}6$ curly-hat operator on $\se$.
+
+The transition function is approximated via 5th-order matrix Taylor expansion (truncated matrix exponential):
+\begin{equation}
+    \bPhi_{\texttt{Const}}(\Delta s) = \sum_{j=0}^{5} \frac{\bA^j\,\Delta s^j}{j!} = \bI + \bA\,\Delta s + \frac{\bA^2}{2}\Delta s^2 + \frac{\bA^3}{6}\Delta s^3 + \frac{\bA^4}{24}\Delta s^4 + \frac{\bA^5}{120}\Delta s^5.
+    \label{eq:phi-constant}
+\end{equation}
+
+\subsubsection{Type: PiecewiseLinear --- Magnus Expansion}
+\label{sec:phi-pwl}
+
+For piecewise-linear inputs, each subsegment $i$ has endpoints $\mathbf{u}_i$ and $\mathbf{u}_{i+1}$.
+Three sub-cases arise:
+
+\paragraph{Sub-case 1: Both endpoints near zero.}
+If $\|\mathbf{u}_i\| < \epsilon$ and $\|\mathbf{u}_{i+1}\| < \epsilon$, the WNOA transition is used for that subsegment.
+
+\paragraph{Sub-case 2: Constant input over subsegment.}
+If $\mathbf{u}_i \approx \mathbf{u}_{i+1}$, the constant-input formula~\eqref{eq:phi-constant} is used with $\tau = \Delta s_{\mathrm{sub}}$.
+
+\paragraph{Sub-case 3: General linear variation.}
+Define the linear decomposition $\mathbf{u}(s) = \mathbf{u}_{(0)} + s\,\mathbf{u}_{(1)}$ where
+$\mathbf{u}_{(0)} = -\mathbf{u}_i$, \;
+$\mathbf{u}_{(1)} = -(\mathbf{u}_{i+1} - \mathbf{u}_i)/\Delta s_{\mathrm{sub}}$,
+and construct:
+\begin{align}
+    \bA_0 &= \begin{pmatrix} \tfrac{1}{2}\curly{\mathbf{u}_{(0)}^{[1:6]}} & \bI_6 \\ \tfrac{1}{2}\curly{\mathbf{u}_{(0)}^{[7:12]}} & -\tfrac{1}{2}\curly{\mathbf{u}_{(0)}^{[1:6]}} \end{pmatrix}, \label{eq:A0}\\[4pt]
+    \bA_1 &= \begin{pmatrix} \tfrac{1}{2}\curly{\mathbf{u}_{(1)}^{[1:6]}} & \bzero_6 \\ \tfrac{1}{2}\curly{\mathbf{u}_{(1)}^{[7:12]}} & -\tfrac{1}{2}\curly{\mathbf{u}_{(1)}^{[1:6]}} \end{pmatrix}. \label{eq:A1}
+\end{align}
+
+Using the \textbf{Magnus expansion} with Lie brackets $[\cdot,\cdot]$, define the coefficients:
+\begin{equation}
+    \bA = \bA_0, \quad \bB = \tfrac{1}{2}\bA_1, \quad \bC = \tfrac{1}{12}[\bA_1, \bA_0], \quad \bD = \tfrac{1}{240}[\bA_1, [\bA_1, \bA_0]],
+    \label{eq:magnus-coeff}
+\end{equation}
+where $[\bA_1, \bA_0] = \bA_1 \bA_0 - \bA_0 \bA_1$.
+
+The 5th-order Magnus expansion for the subsegment transition function is:
+\begin{align}
+    \bPhi_{\mathrm{sub}} &= \bI + \bA\tau + \bigl(\tfrac{1}{2}\bA^2 + \bB\bigr)\tau^2 \nonumber\\
+    &\quad + \bigl(\bC + \tfrac{1}{2}\bA\bB + \tfrac{1}{2}\bB\bA + \tfrac{1}{6}\bA^3\bigr)\tau^3 \nonumber\\
+    &\quad + \bigl(\tfrac{1}{2}\bA\bC + \tfrac{1}{2}\bB^2 + \tfrac{1}{2}\bC\bA + \tfrac{1}{6}\bA^2\bB + \tfrac{1}{6}\bA\bB\bA + \tfrac{1}{6}\bB\bA^2 + \tfrac{1}{24}\bA^4\bigr)\tau^4 \nonumber\\
+    &\quad + \bigl(\bD + \tfrac{1}{2}\bB\bC + \tfrac{1}{2}\bC\bB + \tfrac{1}{6}\bA^2\bC + \tfrac{1}{6}\bA\bB^2 + \tfrac{1}{6}\bA\bC\bA + \tfrac{1}{6}\bB\bA\bB + \tfrac{1}{6}\bB^2\bA \nonumber\\
+    &\qquad\quad + \tfrac{1}{6}\bC\bA^2 + \tfrac{1}{24}\bA^3\bB + \tfrac{1}{24}\bA^2\bB\bA + \tfrac{1}{24}\bA\bB\bA^2 + \tfrac{1}{24}\bB\bA^3 + \tfrac{1}{120}\bA^5\bigr)\tau^5, \label{eq:phi-magnus}
+\end{align}
+where $\tau = \Delta s_{\mathrm{sub}}$.
+
+The total transition function over the full segment is the ordered product of subsegment transitions:
+\begin{equation}
+    \bPhi_{\texttt{PwL}} = \bPhi_{\mathrm{sub}}^{(P-2)} \cdots \bPhi_{\mathrm{sub}}^{(1)}\,\bPhi_{\mathrm{sub}}^{(0)}.
+\end{equation}
+
+%--------------------------------------------------------------------------
+\subsection{Transition Function Integral \texorpdfstring{$\bPhi_{\mathrm{int}}$}{Phi\_int}}
+\label{sec:general-phi-int}
+%--------------------------------------------------------------------------
+
+The transition function integral captures the deterministic drift due to the control input.
+
+\subsubsection{Type: None}
+\begin{equation}
+    \bPhi_{\mathrm{int, None}} = \bzero_{12 \times 1}.
+\end{equation}
+
+\subsubsection{Type: Constant}
+Define the Taylor-expansion coefficients of $\bPhi$:
+\begin{equation}
+    \bPhi^{(j)} = \frac{\bA^j}{j!}, \quad j=1,\ldots,5.
+    \label{eq:phi-taylor-coeff}
+\end{equation}
+The integral is:
+\begin{equation}
+    \bPhi_{\mathrm{int, Const}} = \mathbf{u}_0'\,\tau + \tfrac{1}{2}\bPhi^{(1)}\mathbf{u}_0'\,\tau^2 + \tfrac{1}{3}\bPhi^{(2)}\mathbf{u}_0'\,\tau^3 + \tfrac{1}{4}\bPhi^{(3)}\mathbf{u}_0'\,\tau^4 + \tfrac{1}{5}\bPhi^{(4)}\mathbf{u}_0'\,\tau^5 + \tfrac{1}{6}\bPhi^{(5)}\mathbf{u}_0'\,\tau^6,
+    \label{eq:phi-int-constant}
+\end{equation}
+where $\mathbf{u}_0' = -\mathbf{u}_0$ and $\tau = \Delta s$.
+
+\subsubsection{Type: PiecewiseLinear}
+For each subsegment with linearly varying input, define the \emph{Magnus-corrected} expansion coefficients (note: these differ from the constant-input case because the Magnus correction terms $\bC$ and $\bD$ contribute at higher orders):
+\begin{align}
+    \bPhi^{(1)} &= \bA, \nonumber\\
+    \bPhi^{(2)} &= \tfrac{1}{2}\bA^2, \nonumber\\
+    \bPhi^{(3)} &= \bC + \tfrac{1}{6}\bA^3, \nonumber\\
+    \bPhi^{(4)} &= \tfrac{1}{2}\bA\bC + \tfrac{1}{2}\bC\bA + \tfrac{1}{24}\bA^4, \nonumber\\
+    \bPhi^{(5)} &= \bD + \tfrac{1}{6}\bA^2\bC + \tfrac{1}{6}\bA\bC\bA + \tfrac{1}{6}\bC\bA^2 + \tfrac{1}{120}\bA^5,
+    \label{eq:phi-magnus-coeff}
+\end{align}
+where $\bC = \frac{1}{12}[\bA_1, \bA_0]$ and $\bD = \frac{1}{240}[\bA_1, [\bA_1, \bA_0]]$.
+These are the order-$j$ coefficients of the $\bA$-dependent (i.e., $\bB$-independent) part of the Magnus expansion~\eqref{eq:phi-magnus}.
+
+Additionally, define the cross-term expansion coefficients incorporating $\bB$:
+\begin{align}
+    \bPhi_{11} &= \bB, \nonumber\\
+    \bPhi_{21} &= \tfrac{1}{2}(\bA\bB + \bB\bA), \quad \bPhi_{22} = \tfrac{1}{2}\bB^2, \nonumber\\
+    \bPhi_{31} &= \tfrac{1}{6}(\bA^2\bB + \bA\bB\bA + \bB\bA^2), \quad \bPhi_{32} = \tfrac{1}{6}(\bA\bB^2 + \bB\bA\bB + \bB^2\bA), \nonumber\\
+    \bPhi_{41} &= \tfrac{1}{2}(\bB\bC + \bC\bB) + \tfrac{1}{24}(\bA^3\bB + \bA^2\bB\bA + \bA\bB\bA^2 + \bB\bA^3).
+    \label{eq:phi-mixed}
+\end{align}
+
+The subsegment integral (to 7th order in $\tau$) is:
+\begin{align}
+    \bPhi_{\mathrm{int,sub}} &= \mathbf{u}_{(0)}\tau + \tfrac{1}{2}\bigl(\bPhi^{(1)}\mathbf{u}_{(0)} + \mathbf{u}_{(1)}\bigr)\tau^2 \nonumber\\
+    &\quad + \tfrac{1}{3}\bigl(\tfrac{1}{2}\bPhi^{(1)}\mathbf{u}_{(1)} + \bPhi^{(2)}\mathbf{u}_{(0)} + 2\bPhi_{11}\mathbf{u}_{(0)}\bigr)\tau^3 \nonumber\\
+    &\quad + \tfrac{1}{4}\bigl(\tfrac{1}{3}\bPhi^{(2)}\mathbf{u}_{(1)} + \bPhi^{(3)}\mathbf{u}_{(0)} + \bPhi_{11}\mathbf{u}_{(1)} + \tfrac{5}{3}\bPhi_{21}\mathbf{u}_{(0)}\bigr)\tau^4 \nonumber\\
+    &\quad + \tfrac{1}{5}\bigl(\tfrac{1}{4}\bPhi^{(3)}\mathbf{u}_{(1)} + \bPhi^{(4)}\mathbf{u}_{(0)} + \tfrac{7}{12}\bPhi_{21}\mathbf{u}_{(1)} + \tfrac{8}{3}\bPhi_{22}\mathbf{u}_{(0)} + \tfrac{3}{2}\bPhi_{31}\mathbf{u}_{(0)}\bigr)\tau^5 \nonumber\\
+    &\quad + \tfrac{1}{6}\bigl(\tfrac{1}{5}\bPhi^{(4)}\mathbf{u}_{(1)} + \bPhi^{(5)}\mathbf{u}_{(0)} + \bPhi_{22}\mathbf{u}_{(1)} + \tfrac{2}{5}\bPhi_{31}\mathbf{u}_{(1)} + \tfrac{11}{5}\bPhi_{32}\mathbf{u}_{(0)} + \tfrac{7}{5}\bPhi_{41}\mathbf{u}_{(0)}\bigr)\tau^6 \nonumber\\
+    &\quad + \tfrac{1}{7}\bigl(\tfrac{1}{6}\bPhi^{(5)}\mathbf{u}_{(1)} + \tfrac{19}{30}\bPhi_{32}\mathbf{u}_{(1)} + \tfrac{3}{10}\bPhi_{41}\mathbf{u}_{(1)}\bigr)\tau^7.
+    \label{eq:phi-int-pwl}
+\end{align}
+
+The total integral is assembled by propagating each subsegment's contribution through subsequent transition functions:
+\begin{equation}
+    \bPhi_{\mathrm{int}} = \sum_{i=0}^{P-2} \left(\prod_{j=i+1}^{P-2} \bPhi_{\mathrm{sub}}^{(j)}\right) \bPhi_{\mathrm{int,sub}}^{(i)}.
+\end{equation}
+
+%--------------------------------------------------------------------------
+\subsection{General Covariance \texorpdfstring{$\bQ$}{Q} and Information Matrix \texorpdfstring{$\bQ\inv$}{Q inv}}
+\label{sec:general-qinv}
+%--------------------------------------------------------------------------
+
+Define the projection matrix
+\begin{equation}
+    \bL = \begin{pmatrix} \bzero_{6\times 6} \\ \bI_6 \end{pmatrix} \in \R^{12 \times 6}, \qquad
+    \bL\bQ_c\bL^\top = \begin{pmatrix} \bzero_6 & \bzero_6 \\ \bzero_6 & \bQ_c \end{pmatrix} \in \R^{12 \times 12}.
+    \label{eq:LQLT}
+\end{equation}
+
+\subsubsection{Type: None}
+For WNOA, the covariance has the closed-form inverse~\eqref{eq:qinv-wnoa}, equivalent to:
+\begin{equation}
+    \bQ_{\texttt{None}} = \begin{pmatrix} \frac{\Delta s^3}{3}\bQ_c & \frac{\Delta s^2}{2}\bQ_c \\ \frac{\Delta s^2}{2}\bQ_c & \Delta s\,\bQ_c \end{pmatrix}.
+\end{equation}
+
+\subsubsection{Type: Constant}
+\label{sec:Q-constant}
+Using the expansion coefficients $\bPhi^{(j)} = \bA^j/j!$, the covariance is computed via a Taylor series of the integral $\int_0^\tau \bPhi(s)\,\bL\bQ_c\bL^\top\,\bPhi(s)^\top\,ds$:
+\begin{align}
+    \bQ_{\texttt{Const}} &= \bL\bQ_c\bL^\top\,\tau \nonumber\\
+    &\quad + \tfrac{1}{2}\bigl(\bL\bQ_c\bL^\top{\bPhi^{(1)}}^\top + \bPhi^{(1)}\bL\bQ_c\bL^\top\bigr)\tau^2 \nonumber\\
+    &\quad + \tfrac{1}{3}\bigl(\bL\bQ_c\bL^\top{\bPhi^{(2)}}^\top + \bPhi^{(2)}\bL\bQ_c\bL^\top + \bPhi^{(1)}\bL\bQ_c\bL^\top{\bPhi^{(1)}}^\top\bigr)\tau^3 \nonumber\\
+    &\quad + \tfrac{1}{4}\bigl(\bL\bQ_c\bL^\top{\bPhi^{(3)}}^\top + \bPhi^{(3)}\bL\bQ_c\bL^\top + \bPhi^{(1)}\bL\bQ_c\bL^\top{\bPhi^{(2)}}^\top + \bPhi^{(2)}\bL\bQ_c\bL^\top{\bPhi^{(1)}}^\top\bigr)\tau^4 \nonumber\\
+    &\quad + \tfrac{1}{5}\bigl(\ldots\text{symmetric pattern continues with } \bPhi^{(4)}\ldots\bigr)\tau^5 \nonumber\\
+    &\quad + \tfrac{1}{6}\bigl(\ldots\text{symmetric pattern continues with } \bPhi^{(5)}\ldots\bigr)\tau^6.
+    \label{eq:Q-constant}
+\end{align}
+The general pattern at order $p$ is:
+\begin{equation}
+    \bQ^{(p)} = \frac{1}{p}\sum_{\substack{i+j = p-1 \\ i,j \geq 0}} \bPhi^{(i)}\,\bL\bQ_c\bL^\top\,{\bPhi^{(j)}}^\top.
+\end{equation}
+The information matrix is then $\bQ\inv = \bQ^{-1}$, computed via dense matrix inversion.
+
+\subsubsection{Type: PiecewiseLinear}
+\label{sec:Q-pwl}
+
+For PiecewiseLinear inputs, each subsegment contributes a covariance block $\bQ_{\mathrm{sub}}^{(i)}$.
+The base pattern follows the same structure as the Constant case~\eqref{eq:Q-constant}, but using the Magnus-corrected coefficients $\bPhi^{(j)}$ from~\eqref{eq:phi-magnus-coeff} instead of $\bA^j/j!$.
+
+When the input is linearly varying within a subsegment, additional cross-terms with $\bPhi_{11}, \bPhi_{21}, \bPhi_{22}, \bPhi_{31}, \bPhi_{32}, \bPhi_{41}$ appear.
+The coefficients for the cross-terms are (listing only the additional terms beyond the $\bPhi^{(j)}$-only pattern):
+\begin{align}
+    \text{Order 3:}&\quad +\;\tfrac{2}{3}\bigl(\bL\bQ_c\bL^\top\bPhi_{11}^\top + \bPhi_{11}\bL\bQ_c\bL^\top\bigr)\tau^3 \nonumber\\
+    \text{Order 4:}&\quad +\;\tfrac{5}{12}\bigl(\bL\bQ_c\bL^\top\bPhi_{21}^\top + \bPhi_{21}\bL\bQ_c\bL^\top + \bPhi^{(1)}\bL\bQ_c\bL^\top\bPhi_{11}^\top + \bPhi_{11}\bL\bQ_c\bL^\top{\bPhi^{(1)}}^\top\bigr)\tau^4 \nonumber\\
+    \text{Order 5:}&\quad +\;\tfrac{8}{15}\bigl(\bL\bQ_c\bL^\top\bPhi_{22}^\top + \bPhi_{22}\bL\bQ_c\bL^\top + \bPhi_{11}\bL\bQ_c\bL^\top\bPhi_{11}^\top\bigr)\tau^5 \nonumber\\
+    &\quad +\;\tfrac{3}{10}\bigl(\bL\bQ_c\bL^\top\bPhi_{31}^\top + \bPhi_{31}\bL\bQ_c\bL^\top + \bPhi^{(1)}\bL\bQ_c\bL^\top\bPhi_{21}^\top + \cdots\bigr)\tau^5 \nonumber\\
+    \text{Order 6:}&\quad +\;\tfrac{7}{30}\bigl(\bL\bQ_c\bL^\top\bPhi_{41}^\top + \bPhi_{41}\bL\bQ_c\bL^\top + \cdots\bigr)\tau^6 \nonumber\\
+    &\quad +\;\tfrac{11}{30}\bigl(\bL\bQ_c\bL^\top\bPhi_{32}^\top + \bPhi_{32}\bL\bQ_c\bL^\top + \cdots\bigr)\tau^6.
+    \label{eq:Q-pwl-extra}
+\end{align}
+
+The total covariance is assembled by propagating each subsegment's contribution through subsequent transition functions:
+\begin{equation}
+    \bQ = \sum_{i=0}^{P-2} \left(\prod_{j=i+1}^{P-2}\bPhi_{\mathrm{sub}}^{(j)}\right) \bQ_{\mathrm{sub}}^{(i)} \left(\prod_{j=i+1}^{P-2}\bPhi_{\mathrm{sub}}^{(j)}\right)^\top.
+    \label{eq:Q-propagation}
+\end{equation}
+
+%==========================================================================
+\section{Impact on Estimator Components}
+\label{sec:impact}
+%==========================================================================
+
+\subsection{Prior Term Assembly}
+\label{sec:prior-change}
+
+\paragraph{Original (WNOA).}
+The residual~\eqref{eq:e-wnoa} and information matrix~\eqref{eq:qinv-wnoa} are hardcoded.
+The function \texttt{assemblePriorTerms} takes no control input argument.
+
+\paragraph{Extended.}
+The residual becomes:
+\begin{equation}
+    \boxed{\be = \bgamma_{k+1} - \bPhi(\mathbf{u}, \Delta s)\,\bgamma_k - \bPhi_{\mathrm{int}}(\mathbf{u}, \Delta s),}
+    \label{eq:e-general}
+\end{equation}
+where $\bPhi$ and $\bPhi_{\mathrm{int}}$ are obtained from \texttt{getTransitionFunction} and \texttt{getTransitionFunctionIntegral} for the control input $\mathbf{u}$ associated with the segment.
+The information matrix $\bQ\inv$ is obtained from \texttt{getQInv}.
+
+The Jacobian generalises to:
+\begin{equation}
+    \bF = \begin{pmatrix}
+        -\Jac\inv \Ad & -\bPhi^{[1{:}6,\,7{:}12]} & \Jac\inv & \bzero_6 \\
+        -\tfrac{1}{2}\curly{\bvarpi_{k+1}}\Jac\inv \Ad & -\bPhi^{[7{:}12,\,7{:}12]} & \tfrac{1}{2}\curly{\bvarpi_{k+1}}\Jac\inv & \Jac\inv
+    \end{pmatrix},
+    \label{eq:F-general}
+\end{equation}
+where $\bPhi^{[1{:}6,\,7{:}12]}$ denotes the top-right $6{\times}6$ block of the transition function matrix, and $\bPhi^{[7{:}12,\,7{:}12]}$ denotes the bottom-right block.
+For WNOA, these blocks are $\Delta s\,\bI_6$ and $\bI_6$ respectively, recovering~\eqref{eq:F-wnoa}.
+
+\subsection{Prior Cost Evaluation (Line Search)}
+The cost-only function \texttt{getPriorCost} mirrors the same generalisation:
+it evaluates $\frac{1}{2}\be^\top\bQ\inv\be$ using the general $\bPhi$, $\bPhi_{\mathrm{int}}$, $\bQ\inv$ without assembling Jacobians.
+
+\subsection{GP Interpolation}
+\label{sec:interp-change}
+
+\paragraph{Original (WNOA).}
+The matrices $\bPhi$, $\bQ$, $\bQ\inv$ in the GP interpolation formulas~\eqref{eq:Q-interp-wnoa}--\eqref{eq:interp-wnoa} are the hardcoded WNOA expressions.
+
+\paragraph{Extended.}
+The interpolation now uses:
+\begin{itemize}
+    \item $\bPhi(\Delta s)$, $\bQ\inv(\Delta s)$ from \texttt{getTransitionFunction} and \texttt{getQInv} for the full segment.
+    \item $\bQ(s_q)$ from \texttt{getQPartial} for the partial interval $[s_k, s_q]$.
+    \item $\bPhi(s_q, s_{k+1})$ from \texttt{getTransitionFunctionPartial} for the reverse partial interval.
+    \item $\bPhi(s_k, s_q)$ from \texttt{getTransitionFunctionPartial} for the forward partial interval.
+    \item $\bPhi_{\mathrm{int}}(\Delta s)$ from \texttt{getTransitionFunctionIntegral} for the full segment (used in input offset computation).
+    \item $\bPhi_{\mathrm{int}}(s_q)$ from \texttt{getTransitionFunctionIntegralPartial} for the partial integral.
+\end{itemize}
+
+The GP interpolation coefficients become:
+\begin{align}
+    \bm{\Psi} &= \bQ(s_q)\,\bPhi(s_q, s_{k+1})^\top\,\bQ\inv(\Delta s), \\
+    \bm{\Lambda} &= \bPhi(s_k, s_q) - \bm{\Psi}\,\bPhi(\Delta s),
+\end{align}
+and the interpolated mean accounts for the control input integral:
+\begin{equation}
+    \bgamma_q = \bm{\Lambda}\,\bgamma_k + \bm{\Psi}\,\bgamma_{k+1} + \bPhi_{\mathrm{int}}(s_q) - \bm{\Psi}\,\bPhi_{\mathrm{int}}(\Delta s).
+\end{equation}
+
+\subsection{Initial Guess: PriorMean Type}
+\label{sec:priormean}
+
+A new initial guess type \texttt{PriorMean} is added.
+Rather than seeding the optimiser with straight rods, it forward-propagates the GP prior mean from the base frame of each robot using the transition functions and control inputs.
+
+Starting from node~0 with $\T_{b_0 i} = \T_{i0}\inv$ and $\bvarpi_0 = \bzero$, each subsequent node is obtained by:
+\begin{equation}
+    \bgamma_{k+1} = \bPhi(\mathbf{u}_k, \Delta s)\,\bgamma_k + \bPhi_{\mathrm{int}}(\mathbf{u}_k, \Delta s),
+\end{equation}
+and the global state is recovered via:
+\begin{equation}
+    \T_{b_{k+1} i} = \exp\!\bigl(\bgamma_{k+1}^{[1:6]\,\wedge}\bigr)\,\T_{b_k i}, \qquad
+    \bvarpi_{k+1} = \Jac\!\bigl(\bgamma_{k+1}^{[1:6]}\bigr)\,\bgamma_{k+1}^{[7:12]}.
+\end{equation}
+
+This provides a physically motivated initial guess when control inputs are available, substantially improving convergence when the robot shape is far from straight.
+
+%==========================================================================
+\section{Summary of Code Changes}
+\label{sec:code-changes}
+%==========================================================================
+
+\Cref{tab:changes} summarises the structural changes to the header and implementation files.
+
+\begin{table}[h]
+\centering
+\caption{Summary of code-level changes.}
+\label{tab:changes}
+\small
+\begin{tabular}{@{}p{4.5cm}p{5.5cm}p{5.5cm}@{}}
+\toprule
+\textbf{Component} & \textbf{Original (WNOA)} & \textbf{Extended (General)} \\
+\midrule
+\texttt{ControlInput} struct & Not present & \texttt{enum \{None, Const, PwL\}}; values, robot/segment indices \\
+\midrule
+\texttt{InitialGuessType} enum & \texttt{\{Straight, Last, Custom\}} & \texttt{\{Straight, Last, PriorMean, Custom\}} \\
+\midrule
+\texttt{constructInitialGuess} & No inputs arg; only straight/custom/last & Accepts \texttt{inputs}; adds \texttt{PriorMean} forward-propagation \\
+\midrule
+\texttt{assemblePriorTerms} & Hardcoded $\bPhi$, $\bQ\inv$ (WNOA) & Calls \texttt{getTransitionFunction}, \texttt{getQInv}; adds $\bPhi_{\mathrm{int}}$ \\
+\midrule
+\texttt{getPriorCost} & Hardcoded WNOA & Uses general $\bPhi$, $\bPhi_{\mathrm{int}}$, $\bQ\inv$ \\
+\midrule
+\texttt{interpolateStates} & Hardcoded WNOA $\bPhi$, $\bQ$, $\bQ\inv$ & Calls partial transition functions \\
+\midrule
+\texttt{computeStateEstimate} & No inputs forwarding & Passes \texttt{inputs} to initial guess, prior, measurement, interpolation \\
+\midrule
+\texttt{getTransitionFunction} & Not present & Full/Constant/PwL Magnus expansion \\
+\texttt{getTransitionFunctionIntegral} & Not present & Input integral computation \\
+\texttt{getQInv} & Not present & Input-dependent covariance \\
+\texttt{*Partial} variants & Not present & For GP interpolation sub-intervals \\
+\midrule
+\texttt{PrecomputedValues} & Not present & Caches $\bPhi$, $\bPhi_{\mathrm{int}}$, $\bQ\inv$ per segment \\
+\texttt{m\_LQLT} & Not present & Precomputed $\bL\bQ_c\bL^\top$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%==========================================================================
+\section{Discussion}
+\label{sec:discussion}
+%==========================================================================
+
+\paragraph{Why replace the WNOA prior?}
+The WNOA prior assumes that the continuum robot evolves according to a constant-velocity (in strain) stochastic model.
+While this is adequate when no prior knowledge of the strain field is available, it becomes suboptimal when:
+\begin{itemize}
+    \item External loads or actuation produce known strain contributions that can be incorporated as control inputs.
+    \item The robot backbone follows a prescribed trajectory in configuration space, making the mean of the GP prior non-trivial.
+    \item The physics of the problem (e.g., gravity, tendon tension, magnetic actuation) induces spatially varying curvature that a zero-mean WNOA prior penalises.
+\end{itemize}
+
+\paragraph{Backward compatibility.}
+When all control inputs are \texttt{None} (the default), the general transition functions reduce to the WNOA expressions.
+Specifically:
+\begin{itemize}
+    \item $\bPhi_{\texttt{None}} = \bPhi_{\mathrm{WNOA}}$,
+    \item $\bPhi_{\mathrm{int,None}} = \bzero$,
+    \item $\bQ_{\texttt{None}}\inv = \bQ_{\mathrm{WNOA}}\inv$.
+\end{itemize}
+All existing estimator behaviour is preserved when no control inputs are provided.
+
+\paragraph{Computational cost.}
+The Magnus expansion and numerical covariance integration introduce additional computation per segment.
+However, the \texttt{PrecomputedValues} cache ensures that each segment's transition function, integral, and covariance are computed only once per optimisation run and reused across prior assembly, cost evaluation, and interpolation.
+
+\paragraph{Numerical considerations.}
+The 5th-order truncation of the Magnus expansion is sufficient for the typical arclength intervals encountered in continuum robot discretisation.
+For very large intervals or highly curved inputs, the subsegment decomposition in the piecewise-linear mode naturally limits the expansion parameter, maintaining accuracy.
+
+\begin{thebibliography}{9}
+\bibitem{lilge2022multi}
+T.~Lilge, T.~D.~Barfoot, and J.~Burgner-Kahrs,
+``Continuum robot state estimation using Gaussian process regression on $SE(3)$,''
+\textit{The International Journal of Robotics Research}, vol.~41, no.~13-14, pp.~1099--1120, 2022.
+arXiv: 2210.14842.
+
+\bibitem{lilge2024pcr}
+T.~Lilge, J.~Qi, J.~M.~Jackson, T.~D.~Barfoot, and J.~Burgner-Kahrs,
+``Parallel continuum robot state estimation using Gaussian process regression on $SE(3)$,''
+\textit{IEEE Robotics and Automation Letters}, 2024.
+arXiv: 2408.01333.
+\end{thebibliography}
+
+\end{document}

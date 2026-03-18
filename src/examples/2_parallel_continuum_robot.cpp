@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
 
     ContinuumRobotStateEstimator::SystemState state;
     std::vector<double> cost;
-    state_estimator.computeStateEstimate(state, cost, measurements, vis_settings.verbose);
+    state_estimator.computeStateEstimate(state, cost, measurements, {}, vis_settings.verbose);
 
     state_estimator.printStateMean(state);
 

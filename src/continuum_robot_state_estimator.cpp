@@ -51,6 +51,12 @@ ContinuumRobotStateEstimator::ContinuumRobotStateEstimator(RobotTopology topolog
     validateOptions(options);
     m_options = options;
 
+    // Precompute L*Qc*L^T for use in transition function covariance computations
+    Eigen::Matrix<double,12,6> L;
+    L << Eigen::Matrix<double,6,6>::Zero(),
+         Eigen::Matrix<double,6,6>::Identity();
+    m_LQLT = L * m_hyperparameters.Qc * L.transpose();
+
     //Constrcut projection matrix
     m_P = constructProjectionMatrix();
 
@@ -85,6 +91,12 @@ void ContinuumRobotStateEstimator::setHyperparameters(Hyperparameters parameters
     validateHyperparameters(parameters);
 
     m_hyperparameters = parameters;
+
+    // Precompute L*Qc*L^T for use in transition function covariance computations
+    Eigen::Matrix<double,12,6> L;
+    L << Eigen::Matrix<double,6,6>::Zero(),
+         Eigen::Matrix<double,6,6>::Identity();
+    m_LQLT = L * m_hyperparameters.Qc * L.transpose();
 }
 
 ContinuumRobotStateEstimator::Hyperparameters ContinuumRobotStateEstimator::getHyperparameters()
@@ -247,11 +259,12 @@ void ContinuumRobotStateEstimator::validateMeasurements(std::vector<SensorMeasur
 
 }
 
-ContinuumRobotStateEstimator::SystemState ContinuumRobotStateEstimator::constructInitialGuess(Options::InitialGuessType type)
+ContinuumRobotStateEstimator::SystemState ContinuumRobotStateEstimator::constructInitialGuess(Options::InitialGuessType type, std::vector<ControlInput> inputs)
 {
     // The initial guess strongly affects convergence speed for nonlinear problems.
     // - Straight: deterministic rod-aligned seed.
     // - Last: warm-start from previous estimate.
+    // - PriorMean: forward-propagate the prior mean using transition functions and control inputs.
     // - Custom: user-provided state.
 
     SystemState initial_guess;
@@ -306,6 +319,94 @@ ContinuumRobotStateEstimator::SystemState ContinuumRobotStateEstimator::construc
     {
         initial_guess = m_options.custom_guess;
     }
+    else if(type == Options::InitialGuessType::PriorMean)
+    {
+        // Forward-propagate the prior mean using transition functions and control inputs.
+        // The initial state at node 0 is the base frame T_bi, with zero strain.
+        // Each subsequent node is obtained by applying the transition function.
+        // Note: this produces a state already in T_bi convention (internal optimization convention).
+
+        if(m_robot_topology.common_end_effector)
+        {
+            initial_guess.end_effector.pose = Eigen::Matrix4d::Identity();
+        }
+
+        for(unsigned int n = 0; n < m_robot_topology.N; n++)
+        {
+            SystemState::RobotState robot_state;
+            robot_state.estimation_nodes = {};
+            robot_state.interpolation_nodes = {};
+
+            //Push back first estimation node
+            SystemState::RobotState::Node node;
+            double s = 0;
+            node.arclength = s;
+
+            //Pose: T_bi (body-inertial, internal convention)
+            Eigen::Matrix4d T_ki = invert_transformation(m_robot_topology.Ti0[n]);
+            node.pose = T_ki;
+
+            //Define strain (zero in local frame)
+            Eigen::Matrix<double,6,1> strain;
+            strain << 0, 0, 0, 0, 0, 0;
+            node.strain = strain;
+
+            robot_state.estimation_nodes.push_back(node);
+
+            for(unsigned int k = 0; k < m_robot_topology.K[n] - 1; k++)
+            {
+                //Get control inputs over current interval
+                ControlInput input;
+                input.idx_robot = n;
+                input.idx_segment = k;
+                for(unsigned int c = 0; c < inputs.size(); c++)
+                {
+                    if(inputs.at(c).idx_robot == (int)n && inputs.at(c).idx_segment == (int)k)
+                    {
+                        input = inputs.at(c);
+                    }
+                }
+
+                // Compute transition function and integral term
+                double delta_s = m_robot_topology.L[n]/((m_robot_topology.K[n]-1));
+
+                Eigen::MatrixXd phi = getTransitionFunction(input, delta_s);
+                Eigen::MatrixXd phi_integral = getTransitionFunctionIntegral(input, delta_s);
+
+                // Transform last state into local variables
+                Eigen::Matrix<double,12,1> gamma_k;
+                gamma_k << Eigen::Matrix<double,6,1>::Zero(),
+                        robot_state.estimation_nodes.at(k).strain;
+
+                // Apply motion model
+                Eigen::Matrix<double,12,1> gamma_k1 = phi*gamma_k + phi_integral;
+
+                // Transform state back to global variables
+                Eigen::Matrix4d T_k = robot_state.estimation_nodes.at(k).pose;
+
+                const Eigen::Matrix<double,6,1> xi_k1 = gamma_k1.topRows(6);
+
+                T_ki = vec_to_tran(xi_k1)*T_k;
+                validate_transformation_matrix(T_ki);
+                strain = vec_to_jac(xi_k1)*gamma_k1.bottomRows(6);
+                s = s + delta_s;
+
+                node.pose = T_ki;
+                node.strain = strain;
+                node.arclength = s;
+
+                // Save node
+                robot_state.estimation_nodes.push_back(node);
+            }
+
+            initial_guess.robots.push_back(robot_state);
+
+        }
+
+        // Convert from T_bi back to T_ib convention, so that computeStateEstimate's
+        // subsequent convertStateMeanBodyInertial call produces the correct T_bi state.
+        convertStateMeanBodyInertial(initial_guess);
+    }
     else if(type == Options::InitialGuessType::Last)
     {
         initial_guess = m_state;
@@ -316,15 +417,13 @@ ContinuumRobotStateEstimator::SystemState ContinuumRobotStateEstimator::construc
 
 }
 
-void ContinuumRobotStateEstimator::assemblePriorTerms(std::vector<Eigen::Triplet<double> > &A_tripletList, std::vector<Eigen::Triplet<double> > &b_tripletList, double &cost, ContinuumRobotStateEstimator::SystemState state)
+void ContinuumRobotStateEstimator::assemblePriorTerms(std::vector<Eigen::Triplet<double> > &A_tripletList, std::vector<Eigen::Triplet<double> > &b_tripletList, double &cost, ContinuumRobotStateEstimator::SystemState state, std::vector<ControlInput> inputs)
 {
     // Prior factor between every neighboring node pair along each robot.
     // This is the GP-inspired smoothness prior in SE(3), linearized at current state.
-    //
-    // For each pair (k, k+1), a 12x1 residual e is used:
-    // e = [pose-consistency (6), strain-consistency (6)].
-    // Its Jacobian contributes a 24x24 block in normal equations because two
-    // neighboring 12D states are involved.
+    // With control inputs, the residual becomes:
+    //   e = gamma_{k+1} - Phi * gamma_k - Phi_integral
+    // When inputs are empty (or None), this reduces to the WNOA prior.
 
     //Save total number of nodes
     int total_nodes = std::accumulate(m_robot_topology.K.begin(),m_robot_topology.K.end(),0);
@@ -358,26 +457,38 @@ void ContinuumRobotStateEstimator::assemblePriorTerms(std::vector<Eigen::Triplet
             Eigen::MatrixXd T_ad = tran_adjoint(T_k1*invert_transformation(T_k));
             double delta_s = s_k1 - s_k;
 
+            // Look up control input for this segment
+            ControlInput input;
+            input.idx_robot = n;
+            input.idx_segment = k;
+            for(unsigned int c = 0; c < inputs.size(); c++)
+            {
+                if(inputs.at(c).idx_robot == (int)n && inputs.at(c).idx_segment == (int)k)
+                {
+                    input = inputs.at(c);
+                }
+            }
 
-            Eigen::MatrixXd Qc_inv = invert_diagonal(m_hyperparameters.Qc);
+            // Compute general transition function, integral, and inverse covariance
+            Eigen::MatrixXd phi = getTransitionFunction(input, delta_s);
+            Eigen::MatrixXd phi_integral = getTransitionFunctionIntegral(input, delta_s);
+            Eigen::Matrix<double,12,12> Q_inv = getQInv(input, delta_s);
 
-            // Residual at linearization point:
-            // top 6  -> pose increment consistency over arclength interval
-            // bottom 6 -> strain transition consistency
+            // Build gamma vectors
+            Eigen::Matrix<double,12,1> gamma_k1;
+            gamma_k1 << xi, J_inv*varpi_k1;
+
+            Eigen::Matrix<double,12,1> gamma_k;
+            gamma_k << Eigen::Matrix<double,6,1>::Zero(), varpi_k;
+
+            // Residual: e = gamma_{k+1} - Phi * gamma_k - Phi_integral
             Eigen::Matrix<double, 12,1> e;
-            e << xi - delta_s*varpi_k,
-                    J_inv*varpi_k1 - varpi_k;
+            e = gamma_k1 - phi*gamma_k - phi_integral;
 
-            //Jacobian of the error
+            //Jacobian of the error (generalized with Phi blocks)
             Eigen::Matrix<double,12,24> F;
-            F << -J_inv*T_ad, -delta_s*Eigen::Matrix<double,6,6>::Identity(), J_inv, Eigen::Matrix<double,6,6>::Zero(),
-                    -0.5*curlyhat(varpi_k1)*J_inv*T_ad, -Eigen::Matrix<double,6,6>::Identity(), 0.5*curlyhat(varpi_k1)*J_inv, J_inv;
-
-            // Information matrix of the prior block (inverse covariance).
-            // Scales with powers of delta_s as in GP prior derivation.
-            Eigen::Matrix<double,12,12> Q_inv;
-            Q_inv << 12/(delta_s*delta_s*delta_s)*Qc_inv, -6/(delta_s*delta_s)*Qc_inv,
-                    -6/(delta_s*delta_s)*Qc_inv, 4/(delta_s)*Qc_inv;
+            F << -J_inv*T_ad, -phi.topRightCorner(6,6), J_inv, Eigen::Matrix<double,6,6>::Zero(),
+                    -0.5*curlyhat(varpi_k1)*J_inv*T_ad, -phi.bottomRightCorner(6,6), 0.5*curlyhat(varpi_k1)*J_inv, J_inv;
 
             //Assemble terms into correct spot in matrix
             int k_start = 12*k + 12*k_offset;
@@ -671,7 +782,7 @@ void ContinuumRobotStateEstimator::assembleCouplingTerms(std::vector<Eigen::Trip
 
 }
 
-void ContinuumRobotStateEstimator::assembleMeasurementTerms(std::vector<Eigen::Triplet<double> > &A_tripletList, std::vector<Eigen::Triplet<double> > &b_tripletList, double &cost, ContinuumRobotStateEstimator::SystemState state, std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements)
+void ContinuumRobotStateEstimator::assembleMeasurementTerms(std::vector<Eigen::Triplet<double> > &A_tripletList, std::vector<Eigen::Triplet<double> > &b_tripletList, double &cost, ContinuumRobotStateEstimator::SystemState state, std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements, std::vector<ControlInput> inputs)
 {
     // Measurement factors are local unary factors:
     // - Pose measurement    -> acts on node pose (or end-effector pose)
@@ -867,53 +978,56 @@ void ContinuumRobotStateEstimator::assembleMeasurementTerms(std::vector<Eigen::T
 
 }
 
-double ContinuumRobotStateEstimator::getPriorCost(ContinuumRobotStateEstimator::SystemState state)
+double ContinuumRobotStateEstimator::getPriorCost(ContinuumRobotStateEstimator::SystemState state, std::vector<ControlInput> inputs)
 {
     // Cost-only evaluation used by line-search trial steps.
     // Mirrors assemblePriorTerms but without Jacobian/Hessian assembly.
-    //Set cost to zero
     double cost = 0;
-
 
     // Loop over all robots
     for(unsigned int n = 0; n < m_robot_topology.N; n++)
     {
-        //Loop over all prior terms between two consecutive estimation nodes along the length of each robot
         for(unsigned int k = 0; k < m_robot_topology.K[n] - 1; k++)
         {
-            //Get pose of current and next node
             Eigen::Matrix4d T_k = state.robots[n].estimation_nodes[k].pose;
             Eigen::Matrix4d T_k1 = state.robots[n].estimation_nodes[k+1].pose;
 
-            //Get arclength of current and next node
             double s_k = state.robots[n].estimation_nodes[k].arclength;
             double s_k1 = state.robots[n].estimation_nodes[k+1].arclength;
 
-            //Get strain of current and next node
             Eigen::MatrixXd varpi_k = state.robots[n].estimation_nodes[k].strain;
             Eigen::MatrixXd varpi_k1 = state.robots[n].estimation_nodes[k+1].strain;
 
-            //Compute quantities used below
             Eigen::MatrixXd xi = tran_to_vec(T_k1*invert_transformation(T_k));
             Eigen::MatrixXd J_inv = vec_to_jac_inverse(xi);
             double delta_s = s_k1 - s_k;
 
+            // Look up control input for this segment
+            ControlInput input;
+            input.idx_robot = n;
+            input.idx_segment = k;
+            for(unsigned int c = 0; c < inputs.size(); c++)
+            {
+                if(inputs.at(c).idx_robot == (int)n && inputs.at(c).idx_segment == (int)k)
+                {
+                    input = inputs.at(c);
+                }
+            }
 
-            Eigen::MatrixXd Qc_inv = invert_diagonal(m_hyperparameters.Qc);
+            Eigen::MatrixXd phi = getTransitionFunction(input, delta_s);
+            Eigen::MatrixXd phi_integral = getTransitionFunctionIntegral(input, delta_s);
+            Eigen::Matrix<double,12,12> Q_inv = getQInv(input, delta_s);
 
-            //Compute error vector at operating point
+            Eigen::Matrix<double,12,1> gamma_k1;
+            gamma_k1 << xi, J_inv*varpi_k1;
+
+            Eigen::Matrix<double,12,1> gamma_k;
+            gamma_k << Eigen::Matrix<double,6,1>::Zero(), varpi_k;
+
             Eigen::Matrix<double, 12,1> e;
-            e << xi - delta_s*varpi_k,
-                    J_inv*varpi_k1 - varpi_k;
-
-
-            //Covariance for prior terms
-            Eigen::Matrix<double,12,12> Q_inv;
-            Q_inv << 12/(delta_s*delta_s*delta_s)*Qc_inv, -6/(delta_s*delta_s)*Qc_inv,
-                    -6/(delta_s*delta_s)*Qc_inv, 4/(delta_s)*Qc_inv;
+            e = gamma_k1 - phi*gamma_k - phi_integral;
 
             cost = cost + 0.5*e.transpose()*Q_inv*e;
-
 
         }
 
@@ -993,7 +1107,7 @@ double ContinuumRobotStateEstimator::getCouplingCost(ContinuumRobotStateEstimato
 
 }
 
-double ContinuumRobotStateEstimator::getMeasurementCost(ContinuumRobotStateEstimator::SystemState state, std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements)
+double ContinuumRobotStateEstimator::getMeasurementCost(ContinuumRobotStateEstimator::SystemState state, std::vector<ContinuumRobotStateEstimator::SensorMeasurement> measurements, std::vector<ControlInput> inputs)
 {
     // Cost-only evaluation used by line-search trial steps.
 
@@ -1500,16 +1614,14 @@ void ContinuumRobotStateEstimator::updateStateUncertainties(ContinuumRobotStateE
     }
 }
 
-void ContinuumRobotStateEstimator::interpolateStates(ContinuumRobotStateEstimator::SystemState &state, Eigen::SparseMatrix<double> covariance)
+void ContinuumRobotStateEstimator::interpolateStates(ContinuumRobotStateEstimator::SystemState &state, Eigen::SparseMatrix<double> covariance, std::vector<ControlInput> inputs)
 {
     // GP interpolation between estimation nodes.
-    // For each interval [k, k+1], inserts M[n]-1 intermediate states plus endpoint
-    // according to topology, including interpolated covariance.
+    // Uses general transition functions parameterized by control inputs.
     int k_offset = 0;
     for(unsigned int n = 0; n < m_robot_topology.N; n++)
     {
         state.robots[n].interpolation_nodes.clear();
-
 
         //Define first node for each robot (copy from estimation node)
         SystemState::RobotState::Node node = state.robots[n].estimation_nodes[0];
@@ -1519,71 +1631,59 @@ void ContinuumRobotStateEstimator::interpolateStates(ContinuumRobotStateEstimato
 
         for(unsigned int k = 0; k < m_robot_topology.K[n] - 1; k++)
         {
-            //Define variables that only depend on K
-
-            //Get pose of current and next node
             Eigen::Matrix4d T_k = state.robots[n].estimation_nodes[k].pose;
             Eigen::Matrix4d T_k1 = state.robots[n].estimation_nodes[k+1].pose;
 
-            //Get arclength of current and next node
             double s_k = state.robots[n].estimation_nodes[k].arclength;
             double s_k1 = state.robots[n].estimation_nodes[k+1].arclength;
 
-            //Get strain of current and next node
             Eigen::MatrixXd varpi_k = state.robots[n].estimation_nodes[k].strain;
             Eigen::MatrixXd varpi_k1 = state.robots[n].estimation_nodes[k+1].strain;
 
-            //Compute quantities used below
             Eigen::MatrixXd xi = tran_to_vec(T_k1*invert_transformation(T_k));
             Eigen::MatrixXd J_inv = vec_to_jac_inverse(xi);
 
             double delta_s = s_k1 - s_k;
 
+            // Look up control input for this segment
+            ControlInput input;
+            input.idx_robot = n;
+            input.idx_segment = k;
+            for(unsigned int c = 0; c < inputs.size(); c++)
+            {
+                if(inputs.at(c).idx_robot == (int)n && inputs.at(c).idx_segment == (int)k)
+                {
+                    input = inputs.at(c);
+                }
+            }
 
-            Eigen::MatrixXd Qc = m_hyperparameters.Qc;
-            Eigen::MatrixXd Qc_inv = invert_diagonal(m_hyperparameters.Qc);
-
-            //Covariance for prior terms
-            Eigen::Matrix<double,12,12> Q_inv;
-            Q_inv << 12/(delta_s*delta_s*delta_s)*Qc_inv, -6/(delta_s*delta_s)*Qc_inv,
-                    -6/(delta_s*delta_s)*Qc_inv, 4/(delta_s)*Qc_inv;
-
-
-            Eigen::Matrix<double,12,12> phi;
-            phi << Eigen::Matrix<double,6,6>::Identity(), delta_s*Eigen::Matrix<double,6,6>::Identity(),
-                    Eigen::Matrix<double,6,6>::Zero(), Eigen::Matrix<double,6,6>::Identity();
+            // Use general transition functions
+            Eigen::Matrix<double,12,12> phi = getTransitionFunction(input, delta_s);
+            Eigen::Matrix<double,12,12> Q_inv = getQInv(input, delta_s);
+            Eigen::Matrix<double,12,1> input_integral = getTransitionFunctionIntegral(input, delta_s);
 
 
             for(unsigned int m = 1; m <= m_robot_topology.M[n]; m++)
             {
-                //Create a new node
                 SystemState::RobotState::Node node;
 
-                //Interpolation coefficients
                 double s_q = s_k +  (double)m/((double)m_robot_topology.M[n])*delta_s;
-                node.arclength = s_q; //arclength
+                node.arclength = s_q;
 
                 double delta_s_q = s_q - s_k;
 
-                Eigen::MatrixXd Q;
-                Q.resize(2*Qc.rows(),2*Qc.cols());
+                // Use general partial functions for interpolation
+                Eigen::MatrixXd Q = getQPartial(input, delta_s_q, delta_s);
 
-                Q << delta_s_q*delta_s_q*delta_s_q/3*Qc, delta_s_q*delta_s_q/2*Qc,
-                        delta_s_q*delta_s_q/2*Qc, delta_s_q*Qc;
-
-                Eigen::Matrix<double,12,12> psi_temp;
-
-                psi_temp << Eigen::Matrix<double,6,6>::Identity(), (s_k1 - s_q)*Eigen::Matrix<double,6,6>::Identity(),
-                        Eigen::Matrix<double,6,6>::Zero(), Eigen::Matrix<double,6,6>::Identity();
+                Eigen::Matrix<double,12,12> psi_temp = getTransitionFunctionPartial(input, delta_s_q, delta_s, delta_s);
 
                 Eigen::MatrixXd psi = Q*psi_temp.transpose()*Q_inv;
 
-
-                Eigen::Matrix<double,12,12> lambda;
-
-                lambda << Eigen::Matrix<double,6,6>::Identity(), delta_s_q*Eigen::Matrix<double,6,6>::Identity(),
-                        Eigen::Matrix<double,6,6>::Zero(), Eigen::Matrix<double,6,6>::Identity();
+                Eigen::Matrix<double,12,12> lambda = getTransitionFunctionPartial(input, 0, delta_s_q, delta_s);
                 lambda = lambda - psi*phi;
+
+                // Partial control integral
+                Eigen::Matrix<double,12,1> partial_input_integral = getTransitionFunctionIntegralPartial(input, delta_s_q, delta_s);
 
                 //Interpolate the mean
                 Eigen::Matrix<double,12,1> gamma_1;
@@ -1594,26 +1694,24 @@ void ContinuumRobotStateEstimator::interpolateStates(ContinuumRobotStateEstimato
                 gamma_2 << xi,
                         J_inv*varpi_k1;
 
-                Eigen::MatrixXd gamma = lambda*gamma_1 + psi*gamma_2;
+                Eigen::MatrixXd gamma = partial_input_integral + lambda*gamma_1 + psi*(gamma_2 - input_integral);
 
                 Eigen::Matrix4d T_q = vec_to_tran(gamma.topRows(6)) * T_k;
-                node.pose = T_q; //pose
+                node.pose = T_q;
 
                 Eigen::MatrixXd J_tau = vec_to_jac(gamma.topRows(6));
 
                 Eigen::MatrixXd varpi_q = J_tau*gamma.bottomRows(6);
-                node.strain = varpi_q; // strain
+                node.strain = varpi_q;
 
                 //Interpolate the covariance
                 Eigen::Matrix<double,12,12> Ga_1;
                 Ga_1 << Eigen::Matrix<double,6,6>::Identity(), Eigen::Matrix<double,6,6>::Zero(),
                         0.5*curlyhat(varpi_k),  Eigen::Matrix<double,6,6>::Identity();
 
-
                 Eigen::Matrix<double,12,12> Ga_2;
                 Ga_2 << J_inv, Eigen::Matrix<double,6,6>::Zero(),
                         0.5*curlyhat(varpi_k1)*J_inv, J_inv;
-
 
                 Eigen::Matrix<double,12,12> Xi_1;
                 Xi_1 << Eigen::Matrix<double,6,6>::Identity(), Eigen::Matrix<double,6,6>::Zero(),
@@ -1622,7 +1720,6 @@ void ContinuumRobotStateEstimator::interpolateStates(ContinuumRobotStateEstimato
                 Eigen::Matrix<double,12,12> Xi_2;
                 Xi_2 << tran_adjoint(vec_to_tran(xi)), Eigen::Matrix<double,6,6>::Zero(),
                         Eigen::Matrix<double,6,6>::Zero(), Eigen::Matrix<double,6,6>::Zero();
-
 
                 int k_start = 12*k + 12*k_offset;
 
@@ -1638,13 +1735,7 @@ void ContinuumRobotStateEstimator::interpolateStates(ContinuumRobotStateEstimato
                 Pk << P11k, P12k,
                         P12k.transpose(), P22k;
 
-
-                Eigen::MatrixXd Q_tau;
-                Eigen::Matrix<double,12,12> Q_tau_temp;
-                Q_tau_temp << Eigen::Matrix<double,6,6>::Identity(), (s_k1-s_q)*Eigen::Matrix<double,6,6>::Identity(),
-                        Eigen::Matrix<double,6,6>::Zero(), Eigen::Matrix<double,6,6>::Identity();
-
-                Q_tau = Q - psi*Q_tau_temp*Q;
+                Eigen::MatrixXd Q_tau = Q - psi*psi_temp*Q;
 
                 Eigen::Matrix<double,12,24> lambda_psi;
                 lambda_psi << lambda, psi;
@@ -1661,23 +1752,18 @@ void ContinuumRobotStateEstimator::interpolateStates(ContinuumRobotStateEstimato
 
                 Eigen::MatrixXd covariance_q = Ga_inv*Pq_local*Ga_inv.transpose() + Xi*covariance.block(k_start,k_start,12,12)*Xi.transpose();
 
-                //Save out the relevant variables
-
                 Eigen::Matrix3d rot = node.pose.block(0,0,3,3);
 
-                //We are already transforming in the world frame here (but do it later for the state itself)
                 Eigen::Matrix3d position_covariance = rot.transpose()*covariance_q.block(0,0,3,3)*rot;
                 Eigen::Matrix3d orientation_covariance = rot.transpose()*covariance_q.block(3,3,3,3)*rot;
                 Eigen::Matrix3d nu_covariance = covariance_q.block(6,6,3,3);
                 Eigen::Matrix3d omega_covariance = covariance_q.block(9,9,3,3);
 
-                // We are saving the position covariance so that we can plot ellipsoids from it
                 node.position_covariance = position_covariance;
                 node.orientation_covariance = orientation_covariance;
                 node.nu_covariance = nu_covariance;
                 node.omega_covariance = omega_covariance;
 
-                //Save standard deviations
                 Eigen::Matrix<double,6,1> pose_std;
                 pose_std << std::sqrt(position_covariance(0,0)),
                         std::sqrt(position_covariance(1,1)),
@@ -1697,13 +1783,9 @@ void ContinuumRobotStateEstimator::interpolateStates(ContinuumRobotStateEstimato
                 node.pose_std = pose_std;
                 node.strain_std = strain_std;
 
-                //Push back the node
                 state.robots[n].interpolation_nodes.push_back(node);
 
-
             }
-
-
 
         }
         k_offset = k_offset + m_robot_topology.K[n];
@@ -1874,7 +1956,7 @@ void ContinuumRobotStateEstimator::printNodeInfo(ContinuumRobotStateEstimator::S
 
 }
 
-bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std::vector<double> &cost, std::vector<SensorMeasurement> measurements, bool verbose_mode)
+bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std::vector<double> &cost, std::vector<SensorMeasurement> measurements, std::vector<ControlInput> inputs, bool verbose_mode)
 {
     // High-level flow:
     // 1) validate and initialize
@@ -1882,11 +1964,14 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
     // 3) recover covariance and interpolated states
     // 4) convert means back to user-facing frame convention
 
+    // Clear precomputed transition function cache at the start of each estimation
+    m_precomputed_values.clear();
+
     // Asserts for inputs to make sure they are valid
     validateMeasurements(measurements);
 
     // Setup the initial guess depending on chosen option
-    SystemState current_state = constructInitialGuess(m_options.init_guess_type);
+    SystemState current_state = constructInitialGuess(m_options.init_guess_type, inputs);
 
     // Convert to internal convention used by the derivation.
     // All residual/Jacobian math below assumes T_bi.
@@ -1928,7 +2013,7 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
 
         // Assemble prior terms
         double cost_p;
-        assemblePriorTerms(A_tripletList,b_tripletList,cost_p,current_state);
+        assemblePriorTerms(A_tripletList,b_tripletList,cost_p,current_state,inputs);
 
         // Assemble coupling terms
         double cost_c;
@@ -1938,7 +2023,7 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
         // Assemble measurement terms
         double cost_m;
 
-        assembleMeasurementTerms(A_tripletList,b_tripletList,cost_m,current_state,measurements);
+        assembleMeasurementTerms(A_tripletList,b_tripletList,cost_m,current_state,measurements,inputs);
 
 
 
@@ -2008,7 +2093,7 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
                 updateStateVariables(state_check,step);
 
                 // Evaluate full nonlinear objective at trial state.
-                new_cost = getPriorCost(state_check) + getMeasurementCost(state_check,measurements) + getCouplingCost(state_check);
+                new_cost = getPriorCost(state_check,inputs) + getMeasurementCost(state_check,measurements,inputs) + getCouplingCost(state_check);
                 
                 alpha = tau*alpha; //Half the step to make for next iteration
 
@@ -2072,7 +2157,7 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
     updateStateUncertainties(current_state, m_covariance);
 
     // Fill interpolation nodes so visualization and downstream logic can query dense shape.
-    interpolateStates(current_state, m_covariance);
+    interpolateStates(current_state, m_covariance, inputs);
 
 
     //Convert the state mean back to inertial frame (more intuitive to work with)
@@ -2092,15 +2177,12 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
 
 //  Careful: uses the last saved system state
 //  Need to solve for state estimate before calling this function
-void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEstimator::SystemState &state, std::vector<std::pair<unsigned int, double>> arclengths)
+void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEstimator::SystemState &state, std::vector<std::pair<unsigned int, double>> arclengths, std::vector<ControlInput> inputs)
 {
     // Query API for arbitrary arclength samples after an estimate exists.
-    // Reuses the same GP interpolation machinery as interpolateStates(), but only
-    // at requested coordinates instead of full uniform sampling.
+    // Uses general transition functions parameterized by control inputs.
 
     state = m_state;
-
-
 
     //Convert state to body frames (our equations are written that way)
     convertStateMeanBodyInertial(state);
@@ -2113,15 +2195,12 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
         unsigned int robot_idx = arclengths[i].first;
         double arclength = arclengths[i].second;
 
-        //Make sure the entries in the vector are correct
         assert((robot_idx < m_robot_topology.N) && "Index needs to be between 0 and N-1");
         assert((arclength >= 0) && (arclength <= m_robot_topology.L[robot_idx]) && "Arclength needs to be between 0 and total length L");
 
-        //Create a new node
         SystemState::RobotState::Node node;
         node.arclength = arclength;
 
-        // Locate interval [k, k+1] that contains requested arclength.
         SystemState::RobotState::Node node_k;
         SystemState::RobotState::Node node_k1;
         int k_idx = 0;
@@ -2130,74 +2209,56 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
             node_k = state.robots[robot_idx].estimation_nodes[k];
             node_k1 = state.robots[robot_idx].estimation_nodes[k+1];
             k_idx = k;
-            // Check if the requested arclength agrees with the arclength of the estimation node
-            // Add a small epsilon disturbance to be sure we don't get numerical issues with comparing two doubles
-            // If the requested arclength is L, the loop will end with node_k1 being the last node
-            // Requested arclength can't be bigger than L, we took care about that in the assert above
             if(node.arclength + 1e-10 >= node_k.arclength && node.arclength - 1e-10 <= node_k1.arclength)
             {
                 break;
             }
-
         }
 
-        // Interpolate mean and covariance at requested arclength inside this interval.
-
-        //Get pose of current and next node
         Eigen::Matrix4d T_k = node_k.pose;
         Eigen::Matrix4d T_k1 = node_k1.pose;
 
-        //Get arclength of current and next node
         double s_k = node_k.arclength;
         double s_k1 = node_k1.arclength;
 
-        //Get strain of current and next node
         Eigen::MatrixXd varpi_k = node_k.strain;
         Eigen::MatrixXd varpi_k1 = node_k1.strain;
 
-        //Compute quantities used below
         Eigen::MatrixXd xi = tran_to_vec(T_k1*invert_transformation(T_k));
         Eigen::MatrixXd J_inv = vec_to_jac_inverse(xi);
 
         double delta_s = s_k1 - s_k;
 
-        Eigen::MatrixXd Qc = m_hyperparameters.Qc;
-        Eigen::MatrixXd Qc_inv = invert_diagonal(m_hyperparameters.Qc);
+        // Look up control input for this segment
+        ControlInput input;
+        input.idx_robot = robot_idx;
+        input.idx_segment = k_idx;
+        for(unsigned int c = 0; c < inputs.size(); c++)
+        {
+            if(inputs.at(c).idx_robot == (int)robot_idx && inputs.at(c).idx_segment == k_idx)
+            {
+                input = inputs.at(c);
+            }
+        }
 
-        //Covariance for prior terms
-        Eigen::Matrix<double,12,12> Q_inv;
-        Q_inv << 12/(delta_s*delta_s*delta_s)*Qc_inv, -6/(delta_s*delta_s)*Qc_inv,
-                -6/(delta_s*delta_s)*Qc_inv, 4/(delta_s)*Qc_inv;
+        // Use general transition functions
+        Eigen::Matrix<double,12,12> phi = getTransitionFunction(input, delta_s);
+        Eigen::Matrix<double,12,12> Q_inv = getQInv(input, delta_s);
+        Eigen::Matrix<double,12,1> input_integral_full = getTransitionFunctionIntegral(input, delta_s);
 
-
-        Eigen::Matrix<double,12,12> phi;
-        phi << Eigen::Matrix<double,6,6>::Identity(), delta_s*Eigen::Matrix<double,6,6>::Identity(),
-                Eigen::Matrix<double,6,6>::Zero(), Eigen::Matrix<double,6,6>::Identity();
-
-        //Interpolation coefficients
         double s_q = arclength;
-
         double delta_s_q = s_q - s_k;
 
-        Eigen::MatrixXd Q;
-        Q.resize(2*Qc.rows(),2*Qc.cols());
+        Eigen::MatrixXd Q = getQPartial(input, delta_s_q, delta_s);
 
-        Q << delta_s_q*delta_s_q*delta_s_q/3*Qc, delta_s_q*delta_s_q/2*Qc,
-                delta_s_q*delta_s_q/2*Qc, delta_s_q*Qc;
-
-        Eigen::Matrix<double,12,12> psi_temp;
-
-        psi_temp << Eigen::Matrix<double,6,6>::Identity(), (s_k1 - s_q)*Eigen::Matrix<double,6,6>::Identity(),
-                Eigen::Matrix<double,6,6>::Zero(), Eigen::Matrix<double,6,6>::Identity();
+        Eigen::Matrix<double,12,12> psi_temp = getTransitionFunctionPartial(input, delta_s_q, delta_s, delta_s);
 
         Eigen::MatrixXd psi = Q*psi_temp.transpose()*Q_inv;
 
-
-        Eigen::Matrix<double,12,12> lambda;
-
-        lambda << Eigen::Matrix<double,6,6>::Identity(), delta_s_q*Eigen::Matrix<double,6,6>::Identity(),
-                Eigen::Matrix<double,6,6>::Zero(), Eigen::Matrix<double,6,6>::Identity();
+        Eigen::Matrix<double,12,12> lambda = getTransitionFunctionPartial(input, 0, delta_s_q, delta_s);
         lambda = lambda - psi*phi;
+
+        Eigen::Matrix<double,12,1> partial_input_integral = getTransitionFunctionIntegralPartial(input, delta_s_q, delta_s);
 
         //Interpolate the mean
         Eigen::Matrix<double,12,1> gamma_1;
@@ -2208,26 +2269,24 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
         gamma_2 << xi,
                 J_inv*varpi_k1;
 
-        Eigen::MatrixXd gamma = lambda*gamma_1 + psi*gamma_2;
+        Eigen::MatrixXd gamma = partial_input_integral + lambda*gamma_1 + psi*(gamma_2 - input_integral_full);
 
         Eigen::Matrix4d T_q = vec_to_tran(gamma.topRows(6)) * T_k;
-        node.pose = T_q; //pose
+        node.pose = T_q;
 
         Eigen::MatrixXd J_tau = vec_to_jac(gamma.topRows(6));
 
         Eigen::MatrixXd varpi_q = J_tau*gamma.bottomRows(6);
-        node.strain = varpi_q; // strain
+        node.strain = varpi_q;
 
         //Interpolate the covariance
         Eigen::Matrix<double,12,12> Ga_1;
         Ga_1 << Eigen::Matrix<double,6,6>::Identity(), Eigen::Matrix<double,6,6>::Zero(),
                 0.5*curlyhat(varpi_k),  Eigen::Matrix<double,6,6>::Identity();
 
-
         Eigen::Matrix<double,12,12> Ga_2;
         Ga_2 << J_inv, Eigen::Matrix<double,6,6>::Zero(),
                 0.5*curlyhat(varpi_k1)*J_inv, J_inv;
-
 
         Eigen::Matrix<double,12,12> Xi_1;
         Xi_1 << Eigen::Matrix<double,6,6>::Identity(), Eigen::Matrix<double,6,6>::Zero(),
@@ -2236,7 +2295,6 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
         Eigen::Matrix<double,12,12> Xi_2;
         Xi_2 << tran_adjoint(vec_to_tran(xi)), Eigen::Matrix<double,6,6>::Zero(),
                 Eigen::Matrix<double,6,6>::Zero(), Eigen::Matrix<double,6,6>::Zero();
-
 
         int k_offset = 0;
         for(unsigned int n = 0; n < robot_idx; n++)
@@ -2258,13 +2316,7 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
         Pk << P11k, P12k,
                 P12k.transpose(), P22k;
 
-
-        Eigen::MatrixXd Q_tau;
-        Eigen::Matrix<double,12,12> Q_tau_temp;
-        Q_tau_temp << Eigen::Matrix<double,6,6>::Identity(), (s_k1-s_q)*Eigen::Matrix<double,6,6>::Identity(),
-                Eigen::Matrix<double,6,6>::Zero(), Eigen::Matrix<double,6,6>::Identity();
-
-        Q_tau = Q - psi*Q_tau_temp*Q;
+        Eigen::MatrixXd Q_tau = Q - psi*psi_temp*Q;
 
         Eigen::Matrix<double,12,24> lambda_psi;
         lambda_psi << lambda, psi;
@@ -2281,23 +2333,18 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
 
         Eigen::MatrixXd covariance_q = Ga_inv*Pq_local*Ga_inv.transpose() + Xi*m_covariance.block(k_start,k_start,12,12)*Xi.transpose();
 
-        //Save out the relevant variables
-
         Eigen::Matrix3d rot = node.pose.block(0,0,3,3);
 
-        //We are already transforming in the world frame here (but do it later for the state itself)
         Eigen::Matrix3d position_covariance = rot.transpose()*covariance_q.block(0,0,3,3)*rot;
         Eigen::Matrix3d orientation_covariance = rot.transpose()*covariance_q.block(3,3,3,3)*rot;
         Eigen::Matrix3d nu_covariance = covariance_q.block(6,6,3,3);
         Eigen::Matrix3d omega_covariance = covariance_q.block(9,9,3,3);
 
-        // We are saving the position covariance so that we can plot ellipsoids from it
         node.position_covariance = position_covariance;
         node.orientation_covariance = orientation_covariance;
         node.nu_covariance = nu_covariance;
         node.omega_covariance = omega_covariance;
 
-        //Save standard deviations
         Eigen::Matrix<double,6,1> pose_std;
         pose_std << std::sqrt(position_covariance(0,0)),
                 std::sqrt(position_covariance(1,1)),
@@ -2317,11 +2364,9 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
         node.pose_std = pose_std;
         node.strain_std = strain_std;
 
-        //Push back the node to the corresponding robot (will be ordered by arclength, since we sorted in the beginning)
         state.robots[robot_idx].queried_nodes.push_back(node);
 
     }
-
 
     //Convert state to inertial frames (more intuitive to work with)
     convertStateMeanBodyInertial(state);
@@ -2329,4 +2374,1214 @@ void ContinuumRobotStateEstimator::queryAdditionalStates(ContinuumRobotStateEsti
     //Set saved system state to the state
     m_state = state;
 
+}
+
+
+// ============================================================================
+// Transition functions parameterized by ControlInput
+// When type is None, these return the standard WNOA expressions.
+// ============================================================================
+
+Eigen::MatrixXd ContinuumRobotStateEstimator::getTransitionFunction(ControlInput input, double delta_t_segment)
+{
+
+    Eigen::MatrixXd phi = Eigen::Matrix<double,12,12>::Identity();
+
+    //Check if we already precomputed the transition function
+    for(unsigned int i = 0; i < m_precomputed_values.size(); i++)
+    {
+        if(m_precomputed_values.at(i).idx_robot == input.idx_robot && m_precomputed_values.at(i).idx_segment == input.idx_segment)
+        {
+            return m_precomputed_values.at(i).trans.phi_total;
+        }
+    }
+
+    //Create new precomputed value
+    PrecomputedValues precomp;
+    precomp.idx_robot = input.idx_robot;
+    precomp.idx_segment = input.idx_segment;
+
+    if(input.type == ControlInput::None)
+    {
+        phi.block(0,6,6,6) = Eigen::Matrix<double,6,6>::Identity()*delta_t_segment;
+
+        precomp.trans.phi_segments.push_back(phi);
+        precomp.trans.phi_segments_transpose.push_back(phi.transpose());
+    }
+    else if(input.type == ControlInput::Constant)
+    {
+        Eigen::Matrix<double,12,12> A;
+
+        Eigen::Matrix<double,6,1> v_in = -1*input.values.at(0).topRows(6);
+        Eigen::Matrix<double,6,1> a_in = -1*input.values.at(0).bottomRows(6);
+
+        A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+        Eigen::Matrix<double,12,12> phi_sub = Eigen::Matrix<double,12,12>::Identity();
+
+        double tau = delta_t_segment;
+
+        phi_sub = phi_sub + A*tau;
+        phi_sub = phi_sub + 0.5*A*A*tau*tau;
+        phi_sub = phi_sub + 1.0/6.0*A*A*A*tau*tau*tau;
+        phi_sub = phi_sub + 1.0/24.0*A*A*A*A*tau*tau*tau*tau;
+        phi_sub = phi_sub + 1.0/120.0*A*A*A*A*A*tau*tau*tau*tau*tau;
+
+        phi = phi_sub*phi;
+
+        precomp.trans.phi_segments.push_back(phi);
+        precomp.trans.phi_segments_transpose.push_back(phi.transpose());
+
+    }
+    else if(input.type == ControlInput::PiecewiseLinear)
+    {
+
+        double delta_t_subsegment = delta_t_segment/(input.values.size() - 1);
+
+        for(unsigned int i = 0; i < input.values.size() - 1; i++)
+        {
+            Eigen::Matrix<double,12,12> phi_sub = Eigen::Matrix<double,12,12>::Identity();
+
+            Eigen::Matrix<double,12,1> in_start = -1*input.values.at(i);
+            Eigen::Matrix<double,12,1> in_end = -1*input.values.at(i+1);
+
+            if(in_start.norm() < 1e-10 && in_end.norm() < 1e-10)
+            {
+                phi_sub.block(0,6,6,6) = Eigen::Matrix<double,6,6>::Identity()*delta_t_subsegment;
+
+            }
+            else if(in_start.isApprox(in_end,1e-10))
+            {
+                Eigen::Matrix<double,12,12> A;
+
+                Eigen::Matrix<double,6,1> v_in = in_start.topRows(6);
+                Eigen::Matrix<double,6,1> a_in = in_start.bottomRows(6);
+
+                A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+                double tau = delta_t_subsegment;
+
+                phi_sub = phi_sub + A*tau;
+                phi_sub = phi_sub + 0.5*A*A*tau*tau;
+                phi_sub = phi_sub + 1.0/6.0*A*A*A*tau*tau*tau;
+                phi_sub = phi_sub + 1.0/24.0*A*A*A*A*tau*tau*tau*tau;
+                phi_sub = phi_sub + 1.0/120.0*A*A*A*A*A*tau*tau*tau*tau*tau;
+            }
+            else
+            {
+                Eigen::Matrix<double,12,1> in_1 = (in_end - in_start)/delta_t_subsegment;
+                Eigen::Matrix<double,12,1> in_0 = in_start;
+
+                double tau = delta_t_subsegment;
+
+                Eigen::Matrix<double,12,12> A_0, A_1;
+
+                A_0 << 0.5*curlyhat(in_0.topRows(6)), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(in_0.bottomRows(6)), -0.5*curlyhat(in_0.topRows(6));
+
+                A_1 << 0.5*curlyhat(in_1.topRows(6)), Eigen::Matrix<double,6,6>::Zero(),
+                        0.5*curlyhat(in_1.bottomRows(6)), -0.5*curlyhat(in_1.topRows(6));
+
+                Eigen::Matrix<double,12,12> lie_A1_A0 = lie_bracket(A_1,A_0);
+
+                Eigen::Matrix<double,12,12> A = A_0;
+                Eigen::Matrix<double,12,12> B = 0.5*A_1;
+                Eigen::Matrix<double,12,12> C = 1.0/12.0*lie_A1_A0;
+                Eigen::Matrix<double,12,12> D = 1.0/240.0*lie_bracket(A_1,lie_A1_A0);
+
+                phi_sub = phi_sub + A*tau;
+                phi_sub = phi_sub + (0.5*A*A+B)*tau*tau;
+                phi_sub = phi_sub + (C + 0.5*A*B+0.5*B*A+1.0/6.0*A*A*A)*tau*tau*tau;
+                phi_sub = phi_sub + (1.0/2.0*A*C + 1.0/2.0*B*B + 1.0/2.0*C*A+1.0/6.0*A*A*B+1.0/6.0*A*B*A+1.0/6.0*B*A*A+1.0/24.0*A*A*A*A)*tau*tau*tau*tau;
+                phi_sub = phi_sub + (D + 1.0/2.0*B*C+1.0/2.0*C*B+1.0/6.0*A*A*C+1.0/6.0*A*B*B+1.0/6.0*A*C*A+1.0/6.0*B*A*B+1.0/6.0*B*B*A+1.0/6.0*C*A*A+1.0/24.0*A*A*A*B+1.0/24.0*A*A*B*A+1.0/24.0*A*B*A*A+1.0/24.0*B*A*A*A+1.0/120.0*A*A*A*A*A)*tau*tau*tau*tau*tau;
+
+            }
+
+            phi = phi_sub*phi;
+            precomp.trans.phi_segments.push_back(phi_sub);
+            precomp.trans.phi_segments_transpose.push_back(phi_sub.transpose());
+
+        }
+
+    }
+
+    //Save precomputed values
+    precomp.trans.phi_total = phi;
+
+    m_precomputed_values.push_back(precomp);
+
+    //Return overall result
+    return phi;
+
+}
+
+Eigen::MatrixXd ContinuumRobotStateEstimator::getTransitionFunctionIntegral(ControlInput input, double delta_t_segment)
+{
+    Eigen::Matrix<double,12,1> integral;
+    integral.setZero();
+
+    //Get index of stored precomputed value
+    int precomp_idx = -1;
+
+    for(unsigned int i = 0; i < m_precomputed_values.size(); i++)
+    {
+        if(m_precomputed_values.at(i).idx_robot == input.idx_robot && m_precomputed_values.at(i).idx_segment == input.idx_segment)
+        {
+            precomp_idx = i;
+        }
+    }
+
+    //Check if we already computed integral terms for this node
+    if(m_precomputed_values.at(precomp_idx).trans_int.phi_integral_segments.size() > 0)
+    {
+        return m_precomputed_values.at(precomp_idx).trans_int.phi_integral_total;
+    }
+
+    if(input.type == ControlInput::None)
+    {
+        // Zero integral for WNOA
+        m_precomputed_values.at(precomp_idx).trans_int.phi_integral_segments.push_back(integral);
+    }
+    else if(input.type == ControlInput::Constant)
+    {
+
+        double tau = delta_t_segment;
+
+        Eigen::Matrix<double,12,12> A;
+
+        Eigen::Matrix<double,6,1> v_in = -1*input.values.at(0).topRows(6);
+        Eigen::Matrix<double,6,1> a_in = -1*input.values.at(0).bottomRows(6);
+
+        A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+        Eigen::Matrix<double,12,12> phi_1 = A;
+        Eigen::Matrix<double,12,12> phi_2 = 0.5*A*A;
+        Eigen::Matrix<double,12,12> phi_3 = 1.0/6.0*A*A*A;
+        Eigen::Matrix<double,12,12> phi_4 = 1.0/24.0*A*A*A*A;
+        Eigen::Matrix<double,12,12> phi_5 = 1.0/120.0*A*A*A*A*A;
+
+        Eigen::Matrix<double,12,1> in_0 = -1*input.values.at(0);
+
+        integral = integral + in_0*tau;
+        integral = integral + 1.0/2.0*phi_1*in_0*tau*tau;
+        integral = integral + 1.0/3.0*phi_2*in_0*tau*tau*tau;
+        integral = integral + 1.0/4.0*phi_3*in_0*tau*tau*tau*tau;
+        integral = integral + 1.0/5.0*phi_4*in_0*tau*tau*tau*tau*tau;
+        integral = integral + 1.0/6.0*phi_5*in_0*tau*tau*tau*tau*tau*tau;
+
+        m_precomputed_values.at(precomp_idx).trans_int.phi_integral_segments.push_back(integral);
+
+    }
+    else if(input.type == ControlInput::PiecewiseLinear)
+    {
+
+        //Get the precomputed values of the transition function
+        std::vector<Eigen::Matrix<double,12,12>> phi_segments;
+        phi_segments = m_precomputed_values.at(precomp_idx).trans.phi_segments;
+
+        double delta_t_subsegment = delta_t_segment/(input.values.size() - 1);
+
+        for(unsigned int i = 0; i < input.values.size() - 1; i++)
+        {
+
+            Eigen::Matrix<double,12,1> in_start = -1*input.values.at(i);
+            Eigen::Matrix<double,12,1> in_end = -1*input.values.at(i+1);
+
+            Eigen::Matrix<double,12,1> integral_sub;
+            integral_sub.setZero();
+
+            if(in_start.norm() < 1e-10 && in_end.norm() < 1e-10)
+            {
+                // Do nothing
+            }
+            else if(in_start.isApprox(in_end,1e-10))
+            {
+                double tau = delta_t_subsegment;
+
+                Eigen::Matrix<double,12,12> A;
+
+                Eigen::Matrix<double,6,1> v_in = in_start.topRows(6);
+                Eigen::Matrix<double,6,1> a_in = in_start.bottomRows(6);
+
+                A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+                Eigen::Matrix<double,12,12> phi_1 = A;
+                Eigen::Matrix<double,12,12> phi_2 = 0.5*A*A;
+                Eigen::Matrix<double,12,12> phi_3 = 1.0/6.0*A*A*A;
+                Eigen::Matrix<double,12,12> phi_4 = 1.0/24.0*A*A*A*A;
+                Eigen::Matrix<double,12,12> phi_5 = 1.0/120.0*A*A*A*A*A;
+
+                Eigen::Matrix<double,12,1> in_0 = in_start;
+
+                integral_sub = integral_sub + in_0*tau;
+                integral_sub = integral_sub + 1.0/2.0*phi_1*in_0*tau*tau;
+                integral_sub = integral_sub + 1.0/3.0*phi_2*in_0*tau*tau*tau;
+                integral_sub = integral_sub + 1.0/4.0*phi_3*in_0*tau*tau*tau*tau;
+                integral_sub = integral_sub + 1.0/5.0*phi_4*in_0*tau*tau*tau*tau*tau;
+                integral_sub = integral_sub + 1.0/6.0*phi_5*in_0*tau*tau*tau*tau*tau*tau;
+
+            }
+            else
+            {
+
+                Eigen::Matrix<double,12,1> in_1 = (in_end - in_start)/delta_t_subsegment;
+                Eigen::Matrix<double,12,1> in_0 = in_start;
+
+                double tau = delta_t_subsegment;
+
+                Eigen::Matrix<double,12,12> A_0, A_1;
+
+                A_0 << 0.5*curlyhat(in_0.topRows(6)), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(in_0.bottomRows(6)), -0.5*curlyhat(in_0.topRows(6));
+
+                A_1 << 0.5*curlyhat(in_1.topRows(6)), Eigen::Matrix<double,6,6>::Zero(),
+                        0.5*curlyhat(in_1.bottomRows(6)), -0.5*curlyhat(in_1.topRows(6));
+
+                Eigen::Matrix<double,12,12> lie_A1_A0 = lie_bracket(A_1,A_0);
+
+                Eigen::Matrix<double,12,12> A = A_0;
+                Eigen::Matrix<double,12,12> B = 0.5*A_1;
+                Eigen::Matrix<double,12,12> C = 1.0/12.0*lie_A1_A0;
+                Eigen::Matrix<double,12,12> D = 1.0/240.0*lie_bracket(A_1,lie_A1_A0);
+
+                Eigen::Matrix<double,12,12> phi_1 = A;
+                Eigen::Matrix<double,12,12> phi_2 = (0.5*A*A);
+                Eigen::Matrix<double,12,12> phi_3 = (C +1.0/6.0*A*A*A);
+                Eigen::Matrix<double,12,12> phi_4 = (1.0/2.0*A*C + 1.0/2.0*C*A +1.0/24.0*A*A*A*A);
+                Eigen::Matrix<double,12,12> phi_5 = (D +1.0/6.0*A*A*C + 1.0/6.0*A*C*A + 1.0/6.0*C*A*A + 1.0/120.0*A*A*A*A*A);
+
+                Eigen::Matrix<double,12,12> phi_11 = B;
+                Eigen::Matrix<double,12,12> phi_21 = 0.5*A*B + 0.5*B*A;
+                Eigen::Matrix<double,12,12> phi_22 = 0.5*B*B;
+                Eigen::Matrix<double,12,12> phi_31 = 1.0/6.0*A*A*B + 1.0/6.0*A*B*A + 1.0/6.0*B*A*A;
+                Eigen::Matrix<double,12,12> phi_32 = 1.0/6.0*A*B*B + 1.0/6.0*B*A*B + 1.0/6.0*B*B*A;
+                Eigen::Matrix<double,12,12> phi_41 = 0.5*B*C + 0.5*C*B + 1.0/24.0*A*A*A*B + 1.0/24.0*A*A*B*A + 1.0/24.0*A*B*A*A + 1.0/24.0*B*A*A*A;
+
+                integral_sub = integral_sub + in_0*tau;
+                integral_sub = integral_sub + 1.0/2.0*(phi_1*in_0 + in_1)*tau*tau;
+                integral_sub = integral_sub + 1.0/3.0*(0.5*phi_1*in_1 + phi_2*in_0 + 2*phi_11*in_0)*tau*tau*tau;
+                integral_sub = integral_sub + 1.0/4.0*(1.0/3.0*phi_2*in_1 + phi_3*in_0 + phi_11*in_1 + 5.0/3.0*phi_21*in_0)*tau*tau*tau*tau;
+                integral_sub = integral_sub + 1.0/5.0*(1.0/4.0*phi_3*in_1 + phi_4*in_0 + 7.0/12.0*phi_21*in_1 + 8.0/3.0*phi_22*in_0 + 3.0/2.0*phi_31*in_0)*tau*tau*tau*tau*tau;
+                integral_sub = integral_sub + 1.0/6.0*(1.0/5.0*phi_4*in_1 + phi_5*in_0 + phi_22*in_1 + 2.0/5.0*phi_31*in_1 + 11.0/5.0*phi_32*in_0 + 7.0/5.0*phi_41*in_0)*tau*tau*tau*tau*tau*tau;
+                integral_sub = integral_sub + 1.0/7.0*(1.0/6.0*phi_5*in_1 + 19.0/30.0*phi_32*in_1 + 3.0/10.0*phi_41*in_1)*tau*tau*tau*tau*tau*tau*tau;
+
+            }
+
+            // Save the integral we just computed for later
+            m_precomputed_values.at(precomp_idx).trans_int.phi_integral_segments.push_back(integral_sub);
+
+            //Multiply other transition function segments
+            for(unsigned int j = i + 1; j < input.values.size() - 1; j++)
+            {
+                integral_sub = phi_segments.at(j)*integral_sub;
+            }
+
+            integral = integral + integral_sub;
+        }
+
+    }
+
+    //Save precomputed integral
+    m_precomputed_values.at(precomp_idx).trans_int.phi_integral_total = integral;
+
+    return integral;
+}
+
+Eigen::MatrixXd ContinuumRobotStateEstimator::getQInv(ControlInput input, double delta_t_segment)
+{
+    Eigen::Matrix<double,12,12> Q;
+    Q.setZero();
+
+    //Get index of stored precomputed value
+    int precomp_idx = -1;
+
+    for(unsigned int i = 0; i < m_precomputed_values.size(); i++)
+    {
+        if(m_precomputed_values.at(i).idx_robot == input.idx_robot && m_precomputed_values.at(i).idx_segment == input.idx_segment)
+        {
+            precomp_idx = i;
+        }
+    }
+
+    //Check if we already computed Q terms for this node
+    if(m_precomputed_values.at(precomp_idx).Q.covariance_segments.size() > 0)
+    {
+        return m_precomputed_values.at(precomp_idx).Q.inverse_covariance_total;
+    }
+
+    if(input.type == ControlInput::None)
+    {
+        double tau = delta_t_segment;
+
+        Eigen::Matrix<double,6,6> Qc_inv = invert_diagonal(m_hyperparameters.Qc);
+
+        Eigen::Matrix<double,12,12> Q_inv;
+        Q_inv << 12/(tau*tau*tau)*Qc_inv, -6/(tau*tau)*Qc_inv,
+                -6/(tau*tau)*Qc_inv, 4/(tau)*Qc_inv;
+
+        m_precomputed_values.at(precomp_idx).Q.inverse_covariance_total = Q_inv;
+        m_precomputed_values.at(precomp_idx).Q.covariance_segments.push_back(Eigen::Matrix<double,12,12>::Identity()); // placeholder to mark as computed
+
+        return m_precomputed_values.at(precomp_idx).Q.inverse_covariance_total;
+
+    }
+    else if(input.type == ControlInput::Constant)
+    {
+
+        double tau = delta_t_segment;
+
+        Eigen::Matrix<double,12,12> A;
+
+        Eigen::Matrix<double,6,1> v_in = -1*input.values.at(0).topRows(6);
+        Eigen::Matrix<double,6,1> a_in = -1*input.values.at(0).bottomRows(6);
+
+        A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+        Eigen::Matrix<double,12,12> phi_1 = A;
+        Eigen::Matrix<double,12,12> phi_2 = 0.5*A*A;
+        Eigen::Matrix<double,12,12> phi_3 = 1.0/6.0*A*A*A;
+        Eigen::Matrix<double,12,12> phi_4 = 1.0/24.0*A*A*A*A;
+        Eigen::Matrix<double,12,12> phi_5 = 1.0/120.0*A*A*A*A*A;
+
+        //Order 0
+        Q = Q + m_LQLT*tau;
+        //Order 1
+        Q = Q + 1.0/2.0*(m_LQLT*phi_1.transpose() + phi_1*m_LQLT)*tau*tau;
+        //Order 2
+        Q = Q + 1.0/3.0*(m_LQLT*phi_2.transpose() + phi_2*m_LQLT + phi_1*m_LQLT*phi_1.transpose())*tau*tau*tau;
+        //Order 3
+        Q = Q + 1.0/4.0*(m_LQLT*phi_3.transpose() + phi_3*m_LQLT + phi_1*m_LQLT*phi_2.transpose() + phi_2*m_LQLT*phi_1.transpose())*tau*tau*tau*tau;
+        //Order 4
+        Q = Q + 1.0/5.0*(m_LQLT*phi_4.transpose() + phi_4*m_LQLT + phi_1*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_2.transpose())*tau*tau*tau*tau*tau;
+        //Order 5
+        Q = Q + 1.0/6.0*(m_LQLT*phi_5.transpose() + phi_5*m_LQLT + phi_1*m_LQLT*phi_4.transpose() + phi_4*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_2.transpose())*tau*tau*tau*tau*tau*tau;
+
+        m_precomputed_values.at(precomp_idx).Q.covariance_segments.push_back(Q);
+
+    }
+    else if(input.type == ControlInput::PiecewiseLinear)
+    {
+
+        //Get the precomputed values of the transition function
+        std::vector<Eigen::Matrix<double,12,12>> phi_segments;
+        phi_segments = m_precomputed_values.at(precomp_idx).trans.phi_segments;
+        std::vector<Eigen::Matrix<double,12,12>> phi_segments_transpose;
+        phi_segments_transpose = m_precomputed_values.at(precomp_idx).trans.phi_segments_transpose;
+
+        double delta_t_subsegment = delta_t_segment/(input.values.size() - 1);
+
+        for(unsigned int i = 0; i < input.values.size() - 1; i++)
+        {
+            Eigen::Matrix<double,12,12> Q_sub;
+            Q_sub.setZero();
+
+            Eigen::Matrix<double,12,1> in_start = -1*input.values.at(i);
+            Eigen::Matrix<double,12,1> in_end = -1*input.values.at(i+1);
+
+            if(in_start.norm() < 1e-10 && in_end.norm() < 1e-10)
+            {
+
+                double tau = delta_t_subsegment;
+
+                Eigen::Matrix<double,6,6> Qc = m_hyperparameters.Qc;
+
+                Q_sub << tau*tau*tau/3*Qc, tau*tau/2*Qc,
+                        tau*tau/2*Qc, tau*Qc;
+
+            }
+            else if(in_start.isApprox(in_end,1e-10))
+            {
+
+                double tau = delta_t_subsegment;
+
+                Eigen::Matrix<double,12,12> A;
+
+                Eigen::MatrixXd v_in = in_start.topRows(6);
+                Eigen::MatrixXd a_in = in_start.bottomRows(6);
+
+                A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+                Eigen::Matrix<double,12,12> phi_1 = A;
+                Eigen::Matrix<double,12,12> phi_2 = 0.5*A*A;
+                Eigen::Matrix<double,12,12> phi_3 = 1.0/6.0*A*A*A;
+                Eigen::Matrix<double,12,12> phi_4 = 1.0/24.0*A*A*A*A;
+                Eigen::Matrix<double,12,12> phi_5 = 1.0/120.0*A*A*A*A*A;
+
+                Q_sub = Q_sub + m_LQLT*tau;
+                Q_sub = Q_sub + 1.0/2.0*(m_LQLT*phi_1.transpose() + phi_1*m_LQLT)*tau*tau;
+                Q_sub = Q_sub + 1.0/3.0*(m_LQLT*phi_2.transpose() + phi_2*m_LQLT + phi_1*m_LQLT*phi_1.transpose())*tau*tau*tau;
+                Q_sub = Q_sub + 1.0/4.0*(m_LQLT*phi_3.transpose() + phi_3*m_LQLT + phi_1*m_LQLT*phi_2.transpose() + phi_2*m_LQLT*phi_1.transpose())*tau*tau*tau*tau;
+                Q_sub = Q_sub + 1.0/5.0*(m_LQLT*phi_4.transpose() + phi_4*m_LQLT + phi_1*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_2.transpose())*tau*tau*tau*tau*tau;
+                Q_sub = Q_sub + 1.0/6.0*(m_LQLT*phi_5.transpose() + phi_5*m_LQLT + phi_1*m_LQLT*phi_4.transpose() + phi_4*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_2.transpose())*tau*tau*tau*tau*tau*tau;
+
+            }
+            else
+            {
+
+                Eigen::Matrix<double,12,1> in_1 = (in_end - in_start)/delta_t_subsegment;
+                Eigen::Matrix<double,12,1> in_0 = in_start;
+
+                double tau = delta_t_subsegment;
+
+                Eigen::Matrix<double,12,12> A_0, A_1;
+
+                A_0 << 0.5*curlyhat(in_0.topRows(6)), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(in_0.bottomRows(6)), -0.5*curlyhat(in_0.topRows(6));
+
+                A_1 << 0.5*curlyhat(in_1.topRows(6)), Eigen::Matrix<double,6,6>::Zero(),
+                        0.5*curlyhat(in_1.bottomRows(6)), -0.5*curlyhat(in_1.topRows(6));
+
+                Eigen::Matrix<double,12,12> lie_A1_A0 = lie_bracket(A_1,A_0);
+
+                Eigen::Matrix<double,12,12> A = A_0;
+                Eigen::Matrix<double,12,12> B = 0.5*A_1;
+                Eigen::Matrix<double,12,12> C = 1.0/12.0*lie_A1_A0;
+                Eigen::Matrix<double,12,12> D = 1.0/240.0*lie_bracket(A_1,lie_A1_A0);
+
+                Eigen::Matrix<double,12,12> phi_1 = A;
+                Eigen::Matrix<double,12,12> phi_2 = (0.5*A*A);
+                Eigen::Matrix<double,12,12> phi_3 = (C +1.0/6.0*A*A*A);
+                Eigen::Matrix<double,12,12> phi_4 = (1.0/2.0*A*C + 1.0/2.0*C*A +1.0/24.0*A*A*A*A);
+                Eigen::Matrix<double,12,12> phi_5 = (D +1.0/6.0*A*A*C + 1.0/6.0*A*C*A + 1.0/6.0*C*A*A + 1.0/120.0*A*A*A*A*A);
+
+                Eigen::Matrix<double,12,12> phi_11 = B;
+                Eigen::Matrix<double,12,12> phi_21 = 0.5*A*B + 0.5*B*A;
+                Eigen::Matrix<double,12,12> phi_22 = 0.5*B*B;
+                Eigen::Matrix<double,12,12> phi_31 = 1.0/6.0*A*A*B + 1.0/6.0*A*B*A + 1.0/6.0*B*A*A;
+                Eigen::Matrix<double,12,12> phi_32 = 1.0/6.0*A*B*B + 1.0/6.0*B*A*B + 1.0/6.0*B*B*A;
+                Eigen::Matrix<double,12,12> phi_41 = 0.5*B*C + 0.5*C*B + 1.0/24.0*A*A*A*B + 1.0/24.0*A*A*B*A + 1.0/24.0*A*B*A*A + 1.0/24.0*B*A*A*A;
+
+                // Order 0
+                Q_sub = Q_sub + m_LQLT*tau;
+                // Order 1
+                Q_sub = Q_sub + 1.0/2.0*(m_LQLT*phi_1.transpose() + phi_1*m_LQLT)*tau*tau;
+                // Order 2
+                Q_sub = Q_sub + 1.0/3.0*(m_LQLT*phi_2.transpose() + phi_2*m_LQLT + phi_1*m_LQLT*phi_1.transpose())*tau*tau*tau;
+                Q_sub = Q_sub + 2.0/3.0*(m_LQLT*phi_11.transpose() + phi_11*m_LQLT)*tau*tau*tau;
+                // Order 3
+                Q_sub = Q_sub + 1.0/4.0*(m_LQLT*phi_3.transpose() + phi_3*m_LQLT + phi_1*m_LQLT*phi_2.transpose() + phi_2*m_LQLT*phi_1.transpose())*tau*tau*tau*tau;
+                Q_sub = Q_sub + 5.0/12.0*(m_LQLT*phi_21.transpose() + phi_21*m_LQLT + phi_1*m_LQLT*phi_11.transpose() + phi_11*m_LQLT*phi_1.transpose())*tau*tau*tau*tau;
+                // Order 4
+                Q_sub = Q_sub + 1.0/5.0*(m_LQLT*phi_4.transpose() + phi_4*m_LQLT + phi_1*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_2.transpose())*tau*tau*tau*tau*tau;
+                Q_sub = Q_sub + 8.0/15.0*(m_LQLT*phi_22.transpose() + phi_22*m_LQLT + phi_11*m_LQLT*phi_11.transpose())*tau*tau*tau*tau*tau;
+                Q_sub = Q_sub + 3.0/10.0*(m_LQLT*phi_31.transpose() + phi_31*m_LQLT + phi_1*m_LQLT*phi_21.transpose() + phi_21*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_11.transpose() + phi_11*m_LQLT*phi_2.transpose())*tau*tau*tau*tau*tau;
+                // Order 5
+                Q_sub = Q_sub + 1.0/6.0*(m_LQLT*phi_5.transpose() + phi_5*m_LQLT + phi_1*m_LQLT*phi_4.transpose() + phi_4*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_2.transpose())*tau*tau*tau*tau*tau*tau;
+                Q_sub = Q_sub + 7.0/30*(m_LQLT*phi_41.transpose() + phi_41*m_LQLT + phi_1*m_LQLT*phi_31.transpose() + phi_31*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_21.transpose() + phi_21*m_LQLT*phi_2.transpose() + phi_3*m_LQLT*phi_11.transpose() + phi_11*m_LQLT*phi_3.transpose())*tau*tau*tau*tau*tau*tau;
+                Q_sub = Q_sub + 11.0/30*(m_LQLT*phi_32.transpose() + phi_32*m_LQLT + phi_1*m_LQLT*phi_22.transpose() + phi_22*m_LQLT*phi_1.transpose() + phi_11*m_LQLT*phi_21.transpose() + phi_21*m_LQLT*phi_11.transpose())*tau*tau*tau*tau*tau*tau;
+
+            }
+
+            // Save the covariance we just computed for later
+            m_precomputed_values.at(precomp_idx).Q.covariance_segments.push_back(Q_sub);
+
+            //Multiply other transition function segments
+            for(unsigned int j = i + 1; j < input.values.size() - 1; j++)
+            {
+                Q_sub = phi_segments.at(j)*Q_sub*phi_segments_transpose.at(j);
+            }
+
+            Q = Q + Q_sub;
+        }
+
+    }
+
+    //Save precomputed inverse
+    m_precomputed_values.at(precomp_idx).Q.inverse_covariance_total = Q.inverse();
+
+    return m_precomputed_values.at(precomp_idx).Q.inverse_covariance_total;
+}
+
+
+Eigen::MatrixXd ContinuumRobotStateEstimator::getTransitionFunctionPartial(ControlInput input, double t_k, double t_k1, double delta_t_segment)
+{
+    double delta_t = t_k1 - t_k;
+
+    Eigen::MatrixXd phi = Eigen::Matrix<double,12,12>::Identity();
+
+    if(input.type == ControlInput::None)
+    {
+        phi.block(0,6,6,6) = Eigen::Matrix<double,6,6>::Identity()*delta_t;
+    }
+    else if(input.type == ControlInput::Constant)
+    {
+        Eigen::Matrix<double,12,12> A;
+
+        Eigen::Matrix<double,6,1> v_in = -1*input.values.at(0).topRows(6);
+        Eigen::Matrix<double,6,1> a_in = -1*input.values.at(0).bottomRows(6);
+
+        A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+        Eigen::Matrix<double,12,12> phi_sub = Eigen::Matrix<double,12,12>::Identity();
+
+        double tau = delta_t;
+
+        phi_sub = phi_sub + A*tau;
+        phi_sub = phi_sub + 0.5*A*A*tau*tau;
+        phi_sub = phi_sub + 1.0/6.0*A*A*A*tau*tau*tau;
+        phi_sub = phi_sub + 1.0/24.0*A*A*A*A*tau*tau*tau*tau;
+        phi_sub = phi_sub + 1.0/120.0*A*A*A*A*A*tau*tau*tau*tau*tau;
+
+        phi = phi_sub*phi;
+    }
+    else if(input.type == ControlInput::PiecewiseLinear)
+    {
+
+        //Get the precomputed values of the transition function
+        std::vector<Eigen::Matrix<double,12,12>> phi_segments;
+        for(unsigned int i = 0; i < m_precomputed_values.size(); i++)
+        {
+            if(m_precomputed_values.at(i).idx_robot == input.idx_robot && m_precomputed_values.at(i).idx_segment == input.idx_segment)
+            {
+                phi_segments = m_precomputed_values.at(i).trans.phi_segments;
+            }
+        }
+
+        double delta_t_subsegment = delta_t_segment/(input.values.size() - 1);
+
+        for(unsigned int i = 0; i < input.values.size() - 1; i++)
+        {
+            double t_start = i*delta_t_subsegment;
+            double t_end = (i+1)*delta_t_subsegment;
+
+            if(t_k1 >= t_start && t_k <= t_end)
+            {
+
+                Eigen::Matrix<double,12,1> in_start = -1*input.values.at(i);
+                Eigen::Matrix<double,12,1> in_end = -1*input.values.at(i+1);
+
+                Eigen::Matrix<double,12,12> phi_sub = Eigen::Matrix<double,12,12>::Identity();
+
+                if((t_k <= t_start && std::abs(t_k1 - t_start) < 1e-6) || (t_k1 >= t_end && std::abs(t_k - t_end) < 1e-6))
+                {
+                    phi_sub = Eigen::Matrix<double,12,12>::Identity();
+                }
+                else if((t_k <= t_start || std::abs(t_k - t_start) < 1e-6 ) && (t_k1 >= t_end || std::abs(t_k1 - t_end) < 1e-6))
+                {
+                    phi_sub = phi_segments.at(i);
+                }
+                else
+                {
+                    Eigen::Matrix<double,12,1> in_1 = (in_end - in_start)/delta_t_subsegment;
+
+                    Eigen::Matrix<double,12,1> in_0;
+
+                    double t_0, t_1;
+
+                    if(t_k <= t_start)
+                    {
+                        in_0 = in_start;
+                        t_0 = t_start;
+                    }
+                    else
+                    {
+                        in_0 = in_start + in_1*(t_k - t_start);
+                        t_0 = t_k;
+                    }
+
+                    if(t_k1 >= t_end)
+                    {
+                        t_1 = t_end;
+                    }
+                    else
+                    {
+                        t_1 = t_k1;
+                    }
+
+                    double tau = t_1 - t_0;
+
+                    if(in_start.norm() < 1e-10 && in_end.norm() < 1e-10)
+                    {
+                        phi_sub.block(0,6,6,6) = Eigen::Matrix<double,6,6>::Identity()*tau;
+                    }
+                    else if(in_start.isApprox(in_end,1e-10))
+                    {
+                        Eigen::Matrix<double,12,12> A;
+
+                        Eigen::Matrix<double,6,1> v_in = in_0.topRows(6);
+                        Eigen::Matrix<double,6,1> a_in = in_0.bottomRows(6);
+
+                        A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                                0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+                        phi_sub = phi_sub + A*tau;
+                        phi_sub = phi_sub + 0.5*A*A*tau*tau;
+                        phi_sub = phi_sub + 1.0/6.0*A*A*A*tau*tau*tau;
+                        phi_sub = phi_sub + 1.0/24.0*A*A*A*A*tau*tau*tau*tau;
+                        phi_sub = phi_sub + 1.0/120.0*A*A*A*A*A*tau*tau*tau*tau*tau;
+                    }
+                    else
+                    {
+
+                        Eigen::Matrix<double,12,12> A_0, A_1;
+
+                        A_0 << 0.5*curlyhat(in_0.topRows(6)), Eigen::Matrix<double,6,6>::Identity(),
+                                0.5*curlyhat(in_0.bottomRows(6)), -0.5*curlyhat(in_0.topRows(6));
+
+                        A_1 << 0.5*curlyhat(in_1.topRows(6)), Eigen::Matrix<double,6,6>::Zero(),
+                                0.5*curlyhat(in_1.bottomRows(6)), -0.5*curlyhat(in_1.topRows(6));
+
+                        Eigen::Matrix<double,12,12> lie_A1_A0 = lie_bracket(A_1,A_0);
+
+                        Eigen::Matrix<double,12,12> A = A_0;
+                        Eigen::Matrix<double,12,12> B = 0.5*A_1;
+                        Eigen::Matrix<double,12,12> C = 1.0/12.0*lie_A1_A0;
+                        Eigen::Matrix<double,12,12> D = 1.0/240.0*lie_bracket(A_1,lie_A1_A0);
+
+                        phi_sub = phi_sub + A*tau;
+                        phi_sub = phi_sub + (0.5*A*A+B)*tau*tau;
+                        phi_sub = phi_sub + (C + 0.5*A*B+0.5*B*A+1.0/6.0*A*A*A)*tau*tau*tau;
+                        phi_sub = phi_sub + (1.0/2.0*A*C + 1.0/2.0*B*B + 1.0/2.0*C*A+1.0/6.0*A*A*B+1.0/6.0*A*B*A+1.0/6.0*B*A*A+1.0/24.0*A*A*A*A)*tau*tau*tau*tau;
+                        phi_sub = phi_sub + (D + 1.0/2.0*B*C+1.0/2.0*C*B+1.0/6.0*A*A*C+1.0/6.0*A*B*B+1.0/6.0*A*C*A+1.0/6.0*B*A*B+1.0/6.0*B*B*A+1.0/6.0*C*A*A+1.0/24.0*A*A*A*B+1.0/24.0*A*A*B*A+1.0/24.0*A*B*A*A+1.0/24.0*B*A*A*A+1.0/120.0*A*A*A*A*A)*tau*tau*tau*tau*tau;
+
+                    }
+
+                }
+
+                phi = phi_sub*phi;
+
+            }
+
+        }
+
+    }
+
+    return phi;
+}
+
+Eigen::MatrixXd ContinuumRobotStateEstimator::getTransitionFunctionIntegralPartial(ControlInput input, double tau, double delta_t_segment)
+{
+
+    Eigen::Matrix<double,12,1> integral;
+    integral.setZero();
+
+    if(input.type == ControlInput::None)
+    {
+        // Do nothing - zero integral for WNOA
+    }
+    else if(input.type == ControlInput::Constant)
+    {
+
+        Eigen::Matrix<double,12,12> A;
+
+        Eigen::Matrix<double,6,1> v_in = -1*input.values.at(0).topRows(6);
+        Eigen::Matrix<double,6,1> a_in = -1*input.values.at(0).bottomRows(6);
+
+        A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+        Eigen::Matrix<double,12,12> phi_1 = A;
+        Eigen::Matrix<double,12,12> phi_2 = 0.5*A*A;
+        Eigen::Matrix<double,12,12> phi_3 = 1.0/6.0*A*A*A;
+        Eigen::Matrix<double,12,12> phi_4 = 1.0/24.0*A*A*A*A;
+        Eigen::Matrix<double,12,12> phi_5 = 1.0/120.0*A*A*A*A*A;
+
+        Eigen::Matrix<double,12,1> in_0 = -1*input.values.at(0);
+
+        integral = integral + in_0*tau;
+        integral = integral + 1.0/2.0*phi_1*in_0*tau*tau;
+        integral = integral + 1.0/3.0*phi_2*in_0*tau*tau*tau;
+        integral = integral + 1.0/4.0*phi_3*in_0*tau*tau*tau*tau;
+        integral = integral + 1.0/5.0*phi_4*in_0*tau*tau*tau*tau*tau;
+        integral = integral + 1.0/6.0*phi_5*in_0*tau*tau*tau*tau*tau*tau;
+
+    }
+    else if(input.type == ControlInput::PiecewiseLinear)
+    {
+
+        //Get the precomputed values of the transition function
+        std::vector<Eigen::Matrix<double,12,12>> phi_segments;
+        std::vector<Eigen::Matrix<double,12,1>> phi_int_segments;
+
+        for(unsigned int i = 0; i < m_precomputed_values.size(); i++)
+        {
+            if(m_precomputed_values.at(i).idx_robot == input.idx_robot && m_precomputed_values.at(i).idx_segment == input.idx_segment)
+            {
+                phi_segments = m_precomputed_values.at(i).trans.phi_segments;
+                phi_int_segments = m_precomputed_values.at(i).trans_int.phi_integral_segments;
+            }
+        }
+
+        double delta_t_subsegment = delta_t_segment/(input.values.size() - 1);
+
+        //Detect last segment
+        unsigned int idx_last_segment = 0;
+        Eigen::Matrix<double,12,1> in_start;
+        Eigen::Matrix<double,12,1> in_end;
+        double t_start = 0;
+        double t_end = 0;
+
+        for(unsigned int i = 0; i < input.values.size() - 1; i++)
+        {
+            t_start = delta_t_subsegment*(i);
+            t_end = delta_t_subsegment*(i+1);
+
+            in_start = -1*input.values.at(i);
+            in_end = -1*input.values.at(i+1);
+
+            idx_last_segment = i;
+
+            if(t_start <= tau && tau <= t_end)
+            {
+                break;
+            }
+        }
+
+        //Recompute last transition function
+        Eigen::Matrix<double,12,1> in_1 = (in_end - in_start)/delta_t_subsegment;
+        Eigen::Matrix<double,12,1> in_0 = in_start;
+
+        double t_0 = t_start;
+        double t_1 = tau;
+
+        double tau_sub = t_1 - t_0;
+
+        Eigen::Matrix<double,12,12> phi_last = Eigen::Matrix<double,12,12>::Identity();
+
+        if(std::abs(tau - t_start) < 1e-6)
+        {
+            // Do nothing
+        }
+        else if(std::abs(tau - t_end) < 1e-6)
+        {
+            phi_last = phi_segments.at(idx_last_segment);
+        }
+        else
+        {
+
+            if(in_start.norm() < 1e-10 && in_end.norm() < 1e-10)
+            {
+                phi_last.block(0,6,6,6) = Eigen::Matrix<double,6,6>::Identity()*tau_sub;
+            }
+            else if(in_start.isApprox(in_end,1e-10))
+            {
+                Eigen::Matrix<double,12,12> A;
+
+                Eigen::Matrix<double,6,1> v_in = in_0.topRows(6);
+                Eigen::Matrix<double,6,1> a_in = in_0.bottomRows(6);
+
+                A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+                phi_last = phi_last + A*tau_sub;
+                phi_last = phi_last + 0.5*A*A*tau_sub*tau_sub;
+                phi_last = phi_last + 1.0/6.0*A*A*A*tau_sub*tau_sub*tau_sub;
+                phi_last = phi_last + 1.0/24.0*A*A*A*A*tau_sub*tau_sub*tau_sub*tau_sub;
+                phi_last = phi_last + 1.0/120.0*A*A*A*A*A*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+
+            }
+            else
+            {
+                Eigen::Matrix<double,12,12> A_0, A_1;
+
+                A_0 << 0.5*curlyhat(in_0.topRows(6)), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(in_0.bottomRows(6)), -0.5*curlyhat(in_0.topRows(6));
+
+                A_1 << 0.5*curlyhat(in_1.topRows(6)), Eigen::Matrix<double,6,6>::Zero(),
+                        0.5*curlyhat(in_1.bottomRows(6)), -0.5*curlyhat(in_1.topRows(6));
+
+                Eigen::Matrix<double,12,12> lie_A1_A0 = lie_bracket(A_1,A_0);
+
+                Eigen::Matrix<double,12,12> A = A_0;
+                Eigen::Matrix<double,12,12> B = 0.5*A_1;
+                Eigen::Matrix<double,12,12> C = 1.0/12.0*lie_A1_A0;
+                Eigen::Matrix<double,12,12> D = 1.0/240.0*lie_bracket(A_1,lie_A1_A0);
+
+                phi_last = phi_last + A*tau_sub;
+                phi_last = phi_last + (0.5*A*A+B)*tau_sub*tau_sub;
+                phi_last = phi_last + (C + 0.5*A*B+0.5*B*A+1.0/6.0*A*A*A)*tau_sub*tau_sub*tau_sub;
+                phi_last = phi_last + (1.0/2.0*A*C + 1.0/2.0*B*B + 1.0/2.0*C*A+1.0/6.0*A*A*B+1.0/6.0*A*B*A+1.0/6.0*B*A*A+1.0/24.0*A*A*A*A)*tau_sub*tau_sub*tau_sub*tau_sub;
+                phi_last = phi_last + (D + 1.0/2.0*B*C+1.0/2.0*C*B+1.0/6.0*A*A*C+1.0/6.0*A*B*B+1.0/6.0*A*C*A+1.0/6.0*B*A*B+1.0/6.0*B*B*A+1.0/6.0*C*A*A+1.0/24.0*A*A*A*B+1.0/24.0*A*A*B*A+1.0/24.0*A*B*A*A+1.0/24.0*B*A*A*A+1.0/120.0*A*A*A*A*A)*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+
+            }
+        }
+
+        // Accumulate integrals of previous segments
+        for(unsigned int i = 0; i < idx_last_segment; i++)
+        {
+            Eigen::Matrix<double,12,1> sub_int = phi_int_segments.at(i);
+
+            for(unsigned int j = i + 1; j < idx_last_segment; j++)
+            {
+                sub_int = phi_segments.at(j)*sub_int;
+            }
+
+            sub_int = phi_last*sub_int;
+
+            integral = integral + sub_int;
+        }
+
+        //Compute last (new) integral
+        Eigen::Matrix<double,12,1> integral_sub;
+        integral_sub.setZero();
+
+        if(std::abs(tau - t_start) < 1e-6)
+        {
+            // Do nothing
+        }
+        else if(std::abs(tau - t_end) < 1e-6)
+        {
+            integral_sub = phi_int_segments.at(idx_last_segment);
+        }
+        else
+        {
+            if(in_start.norm() < 1e-10 && in_end.norm() < 1e-10)
+            {
+                //Do nothing
+            }
+            else if(in_start.isApprox(in_end,1e-10))
+            {
+                Eigen::Matrix<double,12,12> A;
+
+                Eigen::Matrix<double,6,1> v_in = in_0.topRows(6);
+                Eigen::Matrix<double,6,1> a_in = in_0.bottomRows(6);
+
+                A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+                Eigen::Matrix<double,12,12> phi_1 = A;
+                Eigen::Matrix<double,12,12> phi_2 = 0.5*A*A;
+                Eigen::Matrix<double,12,12> phi_3 = 1.0/6.0*A*A*A;
+                Eigen::Matrix<double,12,12> phi_4 = 1.0/24.0*A*A*A*A;
+                Eigen::Matrix<double,12,12> phi_5 = 1.0/120.0*A*A*A*A*A;
+
+                integral_sub = integral_sub + in_0*tau_sub;
+                integral_sub = integral_sub + 1.0/2.0*phi_1*in_0*tau_sub*tau_sub;
+                integral_sub = integral_sub + 1.0/3.0*phi_2*in_0*tau_sub*tau_sub*tau_sub;
+                integral_sub = integral_sub + 1.0/4.0*phi_3*in_0*tau_sub*tau_sub*tau_sub*tau_sub;
+                integral_sub = integral_sub + 1.0/5.0*phi_4*in_0*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+                integral_sub = integral_sub + 1.0/6.0*phi_5*in_0*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+
+            }
+            else
+            {
+                Eigen::Matrix<double,12,12> A_0, A_1;
+
+                A_0 << 0.5*curlyhat(in_0.topRows(6)), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(in_0.bottomRows(6)), -0.5*curlyhat(in_0.topRows(6));
+
+                A_1 << 0.5*curlyhat(in_1.topRows(6)), Eigen::Matrix<double,6,6>::Zero(),
+                        0.5*curlyhat(in_1.bottomRows(6)), -0.5*curlyhat(in_1.topRows(6));
+
+                Eigen::Matrix<double,12,12> lie_A1_A0 = lie_bracket(A_1,A_0);
+
+                Eigen::Matrix<double,12,12> A = A_0;
+                Eigen::Matrix<double,12,12> B = 0.5*A_1;
+                Eigen::Matrix<double,12,12> C = 1.0/12.0*lie_A1_A0;
+                Eigen::Matrix<double,12,12> D = 1.0/240.0*lie_bracket(A_1,lie_A1_A0);
+
+                Eigen::Matrix<double,12,12> phi_1 = A;
+                Eigen::Matrix<double,12,12> phi_2 = (0.5*A*A);
+                Eigen::Matrix<double,12,12> phi_3 = (C +1.0/6.0*A*A*A);
+                Eigen::Matrix<double,12,12> phi_4 = (1.0/2.0*A*C + 1.0/2.0*C*A +1.0/24.0*A*A*A*A);
+                Eigen::Matrix<double,12,12> phi_5 = (D +1.0/6.0*A*A*C + 1.0/6.0*A*C*A + 1.0/6.0*C*A*A + 1.0/120.0*A*A*A*A*A);
+
+                Eigen::Matrix<double,12,12> phi_11 = B;
+                Eigen::Matrix<double,12,12> phi_21 = 0.5*A*B + 0.5*B*A;
+                Eigen::Matrix<double,12,12> phi_22 = 0.5*B*B;
+                Eigen::Matrix<double,12,12> phi_31 = 1.0/6.0*A*A*B + 1.0/6.0*A*B*A + 1.0/6.0*B*A*A;
+                Eigen::Matrix<double,12,12> phi_32 = 1.0/6.0*A*B*B + 1.0/6.0*B*A*B + 1.0/6.0*B*B*A;
+                Eigen::Matrix<double,12,12> phi_41 = 0.5*B*C + 0.5*C*B + 1.0/24.0*A*A*A*B + 1.0/24.0*A*A*B*A + 1.0/24.0*A*B*A*A + 1.0/24.0*B*A*A*A;
+
+                integral_sub = integral_sub + in_0*tau_sub;
+                integral_sub = integral_sub + 1.0/2.0*(phi_1*in_0 + in_1)*tau_sub*tau_sub;
+                integral_sub = integral_sub + 1.0/3.0*(0.5*phi_1*in_1 + phi_2*in_0 + 2*phi_11*in_0)*tau_sub*tau_sub*tau_sub;
+                integral_sub = integral_sub + 1.0/4.0*(1.0/3.0*phi_2*in_1 + phi_3*in_0 + phi_11*in_1 + 5.0/3.0*phi_21*in_0)*tau_sub*tau_sub*tau_sub*tau_sub;
+                integral_sub = integral_sub + 1.0/5.0*(1.0/4.0*phi_3*in_1 + phi_4*in_0 + 7.0/12.0*phi_21*in_1 + 8.0/3.0*phi_22*in_0 + 3.0/2.0*phi_31*in_0)*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+                integral_sub = integral_sub + 1.0/6.0*(1.0/5.0*phi_4*in_1 + phi_5*in_0 + phi_22*in_1 + 2.0/5.0*phi_31*in_1 + 11.0/5.0*phi_32*in_0 + 7.0/5.0*phi_41*in_0)*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+                integral_sub = integral_sub + 1.0/7.0*(1.0/6.0*phi_5*in_1 + 19.0/30.0*phi_32*in_1 + 3.0/10.0*phi_41*in_1)*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+
+            }
+        }
+
+        integral = integral + integral_sub;
+
+    }
+
+    return integral;
+
+}
+
+Eigen::MatrixXd ContinuumRobotStateEstimator::getQPartial(ControlInput input, double tau, double delta_t_segment)
+{
+
+    Eigen::Matrix<double,12,12> Q;
+    Q.setZero();
+
+    if(input.type == ControlInput::None)
+    {
+        Eigen::Matrix<double,6,6> Qc = m_hyperparameters.Qc;
+
+        Q << tau*tau*tau/3*Qc, tau*tau/2*Qc,
+                tau*tau/2*Qc, tau*Qc;
+
+    }
+    else if(input.type == ControlInput::Constant)
+    {
+
+        Eigen::Matrix<double,12,12> A;
+
+        Eigen::Matrix<double,6,1> v_in = -1*input.values.at(0).topRows(6);
+        Eigen::Matrix<double,6,1> a_in = -1*input.values.at(0).bottomRows(6);
+
+        A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+        Eigen::Matrix<double,12,12> phi_1 = A;
+        Eigen::Matrix<double,12,12> phi_2 = 0.5*A*A;
+        Eigen::Matrix<double,12,12> phi_3 = 1.0/6.0*A*A*A;
+        Eigen::Matrix<double,12,12> phi_4 = 1.0/24.0*A*A*A*A;
+        Eigen::Matrix<double,12,12> phi_5 = 1.0/120.0*A*A*A*A*A;
+
+        Q = Q + m_LQLT*tau;
+        Q = Q + 1.0/2.0*(m_LQLT*phi_1.transpose() + phi_1*m_LQLT)*tau*tau;
+        Q = Q + 1.0/3.0*(m_LQLT*phi_2.transpose() + phi_2*m_LQLT + phi_1*m_LQLT*phi_1.transpose())*tau*tau*tau;
+        Q = Q + 1.0/4.0*(m_LQLT*phi_3.transpose() + phi_3*m_LQLT + phi_1*m_LQLT*phi_2.transpose() + phi_2*m_LQLT*phi_1.transpose())*tau*tau*tau*tau;
+        Q = Q + 1.0/5.0*(m_LQLT*phi_4.transpose() + phi_4*m_LQLT + phi_1*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_2.transpose())*tau*tau*tau*tau*tau;
+        Q = Q + 1.0/6.0*(m_LQLT*phi_5.transpose() + phi_5*m_LQLT + phi_1*m_LQLT*phi_4.transpose() + phi_4*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_2.transpose())*tau*tau*tau*tau*tau*tau;
+
+    }
+    else if(input.type == ControlInput::PiecewiseLinear)
+    {
+
+        //Get the precomputed values of the transition function
+        std::vector<Eigen::Matrix<double,12,12>> phi_segments;
+        std::vector<Eigen::Matrix<double,12,12>> phi_segments_transpose;
+        std::vector<Eigen::Matrix<double,12,12>> Q_int_segments;
+
+        for(unsigned int i = 0; i < m_precomputed_values.size(); i++)
+        {
+            if(m_precomputed_values.at(i).idx_robot == input.idx_robot && m_precomputed_values.at(i).idx_segment == input.idx_segment)
+            {
+                phi_segments = m_precomputed_values.at(i).trans.phi_segments;
+                phi_segments_transpose = m_precomputed_values.at(i).trans.phi_segments_transpose;
+                Q_int_segments = m_precomputed_values.at(i).Q.covariance_segments;
+            }
+        }
+
+        double delta_t_subsegment = delta_t_segment/(input.values.size() - 1);
+
+        //Detect last segment
+        unsigned int idx_last_segment = 0;
+        Eigen::Matrix<double,12,1> in_start;
+        Eigen::Matrix<double,12,1> in_end;
+        double t_start = 0;
+        double t_end = 0;
+
+        for(unsigned int i = 0; i < input.values.size() - 1; i++)
+        {
+            t_start = delta_t_subsegment*(i);
+            t_end = delta_t_subsegment*(i+1);
+
+            in_start = -1*input.values.at(i);
+            in_end = -1*input.values.at(i+1);
+
+            idx_last_segment = i;
+
+            if(t_start <= tau && tau <= t_end)
+            {
+                break;
+            }
+        }
+
+        Eigen::Matrix<double,12,1> in_1 = (in_end - in_start)/delta_t_subsegment;
+        Eigen::Matrix<double,12,1> in_0 = in_start;
+
+        double t_0 = t_start;
+        double t_1 = tau;
+
+        double tau_sub = t_1 - t_0;
+
+        Eigen::Matrix<double,12,12> phi_last = Eigen::Matrix<double,12,12>::Identity();
+        Eigen::Matrix<double,12,12> phi_last_transpose = Eigen::Matrix<double,12,12>::Identity();
+
+        if(std::abs(tau - t_start) < 1e-6)
+        {
+            // Do nothing
+        }
+        else if(std::abs(tau - t_end) < 1e-6)
+        {
+            phi_last = phi_segments.at(idx_last_segment);
+            phi_last_transpose = phi_segments_transpose.at(idx_last_segment);
+        }
+        else
+        {
+
+            if(in_start.norm() < 1e-10 && in_end.norm() < 1e-10)
+            {
+                phi_last.block(0,6,6,6) = Eigen::Matrix<double,6,6>::Identity()*tau_sub;
+            }
+            else if(in_start.isApprox(in_end,1e-10))
+            {
+                Eigen::Matrix<double,12,12> A;
+
+                Eigen::Matrix<double,6,1> v_in = in_0.topRows(6);
+                Eigen::Matrix<double,6,1> a_in = in_0.bottomRows(6);
+
+                A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+                phi_last = phi_last + A*tau_sub;
+                phi_last = phi_last + 0.5*A*A*tau_sub*tau_sub;
+                phi_last = phi_last + 1.0/6.0*A*A*A*tau_sub*tau_sub*tau_sub;
+                phi_last = phi_last + 1.0/24.0*A*A*A*A*tau_sub*tau_sub*tau_sub*tau_sub;
+                phi_last = phi_last + 1.0/120.0*A*A*A*A*A*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+            }
+            else
+            {
+
+                Eigen::Matrix<double,12,12> A_0, A_1;
+
+                A_0 << 0.5*curlyhat(in_0.topRows(6)), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(in_0.bottomRows(6)), -0.5*curlyhat(in_0.topRows(6));
+
+                A_1 << 0.5*curlyhat(in_1.topRows(6)), Eigen::Matrix<double,6,6>::Zero(),
+                        0.5*curlyhat(in_1.bottomRows(6)), -0.5*curlyhat(in_1.topRows(6));
+
+                Eigen::Matrix<double,12,12> lie_A1_A0 = lie_bracket(A_1,A_0);
+
+                Eigen::Matrix<double,12,12> A = A_0;
+                Eigen::Matrix<double,12,12> B = 0.5*A_1;
+                Eigen::Matrix<double,12,12> C = 1.0/12.0*lie_A1_A0;
+                Eigen::Matrix<double,12,12> D = 1.0/240.0*lie_bracket(A_1,lie_A1_A0);
+
+                phi_last = phi_last + A*tau_sub;
+                phi_last = phi_last + (0.5*A*A+B)*tau_sub*tau_sub;
+                phi_last = phi_last + (C + 0.5*A*B+0.5*B*A+1.0/6.0*A*A*A)*tau_sub*tau_sub*tau_sub;
+                phi_last = phi_last + (1.0/2.0*A*C + 1.0/2.0*B*B + 1.0/2.0*C*A+1.0/6.0*A*A*B+1.0/6.0*A*B*A+1.0/6.0*B*A*A+1.0/24.0*A*A*A*A)*tau_sub*tau_sub*tau_sub*tau_sub;
+                phi_last = phi_last + (D + 1.0/2.0*B*C+1.0/2.0*C*B+1.0/6.0*A*A*C+1.0/6.0*A*B*B+1.0/6.0*A*C*A+1.0/6.0*B*A*B+1.0/6.0*B*B*A+1.0/6.0*C*A*A+1.0/24.0*A*A*A*B+1.0/24.0*A*A*B*A+1.0/24.0*A*B*A*A+1.0/24.0*B*A*A*A+1.0/120.0*A*A*A*A*A)*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+
+            }
+
+            phi_last_transpose = phi_last.transpose();
+        }
+
+        // Accumulate integrals of previous segments
+        for(unsigned int i = 0; i < idx_last_segment; i++)
+        {
+            Eigen::Matrix<double,12,12> sub_int = Q_int_segments.at(i);
+
+            for(unsigned int j = i + 1; j < idx_last_segment; j++)
+            {
+                sub_int = phi_segments.at(j)*sub_int*phi_segments_transpose.at(j);
+            }
+
+            sub_int = phi_last*sub_int*phi_last_transpose;
+
+            Q = Q + sub_int;
+        }
+
+        //Compute last (new) Q sub
+        Eigen::Matrix<double,12,12> Q_sub;
+        Q_sub.setZero();
+
+        if(std::abs(tau - t_start) < 1e-6)
+        {
+            // Do nothing
+        }
+        else if(std::abs(tau - t_end) < 1e-6)
+        {
+            Q_sub = Q_int_segments.at(idx_last_segment);
+        }
+        else
+        {
+
+            if(in_start.norm() < 1e-10 && in_end.norm() < 1e-10)
+            {
+
+                Eigen::Matrix<double,6,6> Qc = m_hyperparameters.Qc;
+
+                Q_sub << tau_sub*tau_sub*tau_sub/3*Qc, tau_sub*tau_sub/2*Qc,
+                        tau_sub*tau_sub/2*Qc, tau_sub*Qc;
+            }
+            else if(in_start.isApprox(in_end,1e-10))
+            {
+
+                Eigen::Matrix<double,12,12> A;
+
+                Eigen::Matrix<double,6,1> v_in = in_0.topRows(6);
+                Eigen::Matrix<double,6,1> a_in = in_0.bottomRows(6);
+
+                A << 0.5*curlyhat(v_in), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(a_in), -0.5*curlyhat(v_in);
+
+                Eigen::Matrix<double,12,12> phi_1 = A;
+                Eigen::Matrix<double,12,12> phi_2 = 0.5*A*A;
+                Eigen::Matrix<double,12,12> phi_3 = 1.0/6.0*A*A*A;
+                Eigen::Matrix<double,12,12> phi_4 = 1.0/24.0*A*A*A*A;
+                Eigen::Matrix<double,12,12> phi_5 = 1.0/120.0*A*A*A*A*A;
+
+                Q_sub = Q_sub + m_LQLT*tau_sub;
+                Q_sub = Q_sub + 1.0/2.0*(m_LQLT*phi_1.transpose() + phi_1*m_LQLT)*tau_sub*tau_sub;
+                Q_sub = Q_sub + 1.0/3.0*(m_LQLT*phi_2.transpose() + phi_2*m_LQLT + phi_1*m_LQLT*phi_1.transpose())*tau_sub*tau_sub*tau_sub;
+                Q_sub = Q_sub + 1.0/4.0*(m_LQLT*phi_3.transpose() + phi_3*m_LQLT + phi_1*m_LQLT*phi_2.transpose() + phi_2*m_LQLT*phi_1.transpose())*tau_sub*tau_sub*tau_sub*tau_sub;
+                Q_sub = Q_sub + 1.0/5.0*(m_LQLT*phi_4.transpose() + phi_4*m_LQLT + phi_1*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_2.transpose())*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+                Q_sub = Q_sub + 1.0/6.0*(m_LQLT*phi_5.transpose() + phi_5*m_LQLT + phi_1*m_LQLT*phi_4.transpose() + phi_4*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_2.transpose())*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+
+            }
+            else
+            {
+                Eigen::Matrix<double,12,12> A_0, A_1;
+
+                A_0 << 0.5*curlyhat(in_0.topRows(6)), Eigen::Matrix<double,6,6>::Identity(),
+                        0.5*curlyhat(in_0.bottomRows(6)), -0.5*curlyhat(in_0.topRows(6));
+
+                A_1 << 0.5*curlyhat(in_1.topRows(6)), Eigen::Matrix<double,6,6>::Zero(),
+                        0.5*curlyhat(in_1.bottomRows(6)), -0.5*curlyhat(in_1.topRows(6));
+
+                Eigen::Matrix<double,12,12> lie_A1_A0 = lie_bracket(A_1,A_0);
+
+                Eigen::Matrix<double,12,12> A = A_0;
+                Eigen::Matrix<double,12,12> B = 0.5*A_1;
+                Eigen::Matrix<double,12,12> C = 1.0/12.0*lie_A1_A0;
+                Eigen::Matrix<double,12,12> D = 1.0/240.0*lie_bracket(A_1,lie_A1_A0);
+
+                Eigen::Matrix<double,12,12> phi_1 = A;
+                Eigen::Matrix<double,12,12> phi_2 = (0.5*A*A);
+                Eigen::Matrix<double,12,12> phi_3 = (C +1.0/6.0*A*A*A);
+                Eigen::Matrix<double,12,12> phi_4 = (1.0/2.0*A*C + 1.0/2.0*C*A +1.0/24.0*A*A*A*A);
+                Eigen::Matrix<double,12,12> phi_5 = (D +1.0/6.0*A*A*C + 1.0/6.0*A*C*A + 1.0/6.0*C*A*A + 1.0/120.0*A*A*A*A*A);
+
+                Eigen::Matrix<double,12,12> phi_11 = B;
+                Eigen::Matrix<double,12,12> phi_21 = 0.5*A*B + 0.5*B*A;
+                Eigen::Matrix<double,12,12> phi_22 = 0.5*B*B;
+                Eigen::Matrix<double,12,12> phi_31 = 1.0/6.0*A*A*B + 1.0/6.0*A*B*A + 1.0/6.0*B*A*A;
+                Eigen::Matrix<double,12,12> phi_32 = 1.0/6.0*A*B*B + 1.0/6.0*B*A*B + 1.0/6.0*B*B*A;
+                Eigen::Matrix<double,12,12> phi_41 = 0.5*B*C + 0.5*C*B + 1.0/24.0*A*A*A*B + 1.0/24.0*A*A*B*A + 1.0/24.0*A*B*A*A + 1.0/24.0*B*A*A*A;
+
+                // Order 0
+                Q_sub = Q_sub + m_LQLT*tau_sub;
+                // Order 1
+                Q_sub = Q_sub + 1.0/2.0*(m_LQLT*phi_1.transpose() + phi_1*m_LQLT)*tau_sub*tau_sub;
+                // Order 2
+                Q_sub = Q_sub + 1.0/3.0*(m_LQLT*phi_2.transpose() + phi_2*m_LQLT + phi_1*m_LQLT*phi_1.transpose())*tau_sub*tau_sub*tau_sub;
+                Q_sub = Q_sub + 2.0/3.0*(m_LQLT*phi_11.transpose() + phi_11*m_LQLT)*tau_sub*tau_sub*tau_sub;
+                // Order 3
+                Q_sub = Q_sub + 1.0/4.0*(m_LQLT*phi_3.transpose() + phi_3*m_LQLT + phi_1*m_LQLT*phi_2.transpose() + phi_2*m_LQLT*phi_1.transpose())*tau_sub*tau_sub*tau_sub*tau_sub;
+                Q_sub = Q_sub + 5.0/12.0*(m_LQLT*phi_21.transpose() + phi_21*m_LQLT + phi_1*m_LQLT*phi_11.transpose() + phi_11*m_LQLT*phi_1.transpose())*tau_sub*tau_sub*tau_sub*tau_sub;
+                // Order 4
+                Q_sub = Q_sub + 1.0/5.0*(m_LQLT*phi_4.transpose() + phi_4*m_LQLT + phi_1*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_2.transpose())*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+                Q_sub = Q_sub + 8.0/15.0*(m_LQLT*phi_22.transpose() + phi_22*m_LQLT + phi_11*m_LQLT*phi_11.transpose())*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+                Q_sub = Q_sub + 3.0/10.0*(m_LQLT*phi_31.transpose() + phi_31*m_LQLT + phi_1*m_LQLT*phi_21.transpose() + phi_21*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_11.transpose() + phi_11*m_LQLT*phi_2.transpose())*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+                // Order 5
+                Q_sub = Q_sub + 1.0/6.0*(m_LQLT*phi_5.transpose() + phi_5*m_LQLT + phi_1*m_LQLT*phi_4.transpose() + phi_4*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_3.transpose() + phi_3*m_LQLT*phi_2.transpose())*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+                Q_sub = Q_sub + 7.0/30*(m_LQLT*phi_41.transpose() + phi_41*m_LQLT + phi_1*m_LQLT*phi_31.transpose() + phi_31*m_LQLT*phi_1.transpose() + phi_2*m_LQLT*phi_21.transpose() + phi_21*m_LQLT*phi_2.transpose() + phi_3*m_LQLT*phi_11.transpose() + phi_11*m_LQLT*phi_3.transpose())*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+                Q_sub = Q_sub + 11.0/30*(m_LQLT*phi_32.transpose() + phi_32*m_LQLT + phi_1*m_LQLT*phi_22.transpose() + phi_22*m_LQLT*phi_1.transpose() + phi_11*m_LQLT*phi_21.transpose() + phi_21*m_LQLT*phi_11.transpose())*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub*tau_sub;
+
+            }
+
+        }
+
+        Q = Q + Q_sub;
+
+    }
+
+    return Q;
 }

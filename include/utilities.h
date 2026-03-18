@@ -220,6 +220,9 @@ Eigen::Matrix4d invert_transformation(Eigen::Matrix4d T);
 
 Eigen::MatrixXd invert_diagonal(Eigen::MatrixXd matrix);
 
+// Computes the Lie bracket [A, B] = A*B - B*A
+Eigen::MatrixXd lie_bracket(const Eigen::MatrixXd &A, const Eigen::MatrixXd &B);
+
 // Load CSV files to Eigen Matrix
 // From: https://stackoverflow.com/questions/34247057/how-to-read-csv-file-and-assign-to-eigen-matrix
 template<typename M> M load_csv(const std::string & path) {

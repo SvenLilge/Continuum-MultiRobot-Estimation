@@ -49,19 +49,120 @@ options:
   kirchhoff_rods: true
 
 measurements:
-  # Strain measurements for first half of robot
+# change strain live like input
+  # Sparse strain measurements — just enough to loosely constrain, letting control inputs dominate
   - type: Strain
     idx_robot: 0
     idx_node_range: [0, 10]
     mask: [1, 1, 1, 1, 1, 1]
     value: [1, 0, 0, 0, 10, 0]
 
-  # Strain measurements for second half of robot
   - type: Strain
     idx_robot: 0
     idx_node_range: [11, 20]
     mask: [1, 1, 1, 1, 1, 1]
     value: [1, 0, 0, 0, -10, 0]
+
+# Control inputs applied to specific robot segments (modulate the GP prior)
+# Each value is a 12x1 vector: [v1,v2,v3, w1,w2,w3, a1,a2,a3, alpha1,alpha2,alpha3]
+# (translational + rotational velocity and acceleration in se(3))
+control_inputs:
+  # Apply constant curvature to first half (bending about local y-axis)
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 0
+    values:
+      - [0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 1
+    values:
+      - [0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 2
+    values:
+      - [0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 3
+    values:
+      - [0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 4
+    values:
+      - [0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 5
+    values:
+      - [0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 6
+    values:
+      - [0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 7
+    values:
+      - [0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 8
+    values:
+      - [0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 9
+    values:
+      - [0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 10
+    values:
+      - [0, 0, 0, 0, -10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 11
+    values:
+      - [0, 0, 0, 0, -10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 12
+    values:
+      - [0, 0, 0, 0, -10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 13
+    values:
+      - [0, 0, 0, 0, -10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 14
+    values:
+      - [0, 0, 0, 0, -10, 0, 0, 0, 0, 0, 0, 0]
+
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 15
+    values:
+      - [0, 0, 0, 0, -10, 0, 0, 0, 0, 0, 0, 0]
 
 visualization:
   window_width: 1280

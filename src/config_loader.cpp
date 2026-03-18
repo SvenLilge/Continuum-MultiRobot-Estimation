@@ -116,6 +116,11 @@ ConfigLoader::ConfigLoader(const std::string& config_path)
         parseMeasurements(&meas_node);
     }
 
+    if (root["control_inputs"]) {
+        YAML::Node ci_node = root["control_inputs"];
+        parseControlInputs(&ci_node);
+    }
+
     if (root["visualization"]) {
         YAML::Node vis_node = root["visualization"];
         parseVisualization(&vis_node);
@@ -130,6 +135,7 @@ ContinuumRobotStateEstimator::RobotTopology ConfigLoader::getTopology() const { 
 ContinuumRobotStateEstimator::Hyperparameters ConfigLoader::getHyperparameters() const { return m_hyperparameters; }
 ContinuumRobotStateEstimator::Options ConfigLoader::getOptions() const { return m_options; }
 std::vector<ContinuumRobotStateEstimator::SensorMeasurement> ConfigLoader::getMeasurements() const { return m_measurements; }
+std::vector<ContinuumRobotStateEstimator::ControlInput> ConfigLoader::getControlInputs() const { return m_control_inputs; }
 ConfigLoader::VisualizationSettings ConfigLoader::getVisualizationSettings() const { return m_vis_settings; }
 
 // Path resolution
@@ -579,6 +585,72 @@ void ConfigLoader::parseMeasurements(const void* ptr)
 
             m_measurements.push_back(m);
         }
+    }
+}
+
+// Control Inputs
+
+// Parses the optional [control_inputs] section which defines control inputs
+// for specific robot segments. Each entry specifies:
+//   type       : "None", "Constant", or "PiecewiseLinear"
+//   idx_robot  : which robot this input belongs to (0-indexed)
+//   idx_segment: which segment (between estimation nodes) this input applies to
+//   values     : list of 12-element vectors (velocity + acceleration in se(3))
+//                - Constant: exactly 1 value
+//                - PiecewiseLinear: 2 values (start and end of segment)
+//
+// Example YAML:
+//   control_inputs:
+//     - type: Constant
+//       idx_robot: 0
+//       idx_segment: 0
+//       values:
+//         - [0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]
+void ConfigLoader::parseControlInputs(const void* ptr)
+{
+    const YAML::Node& ci_list = AS_NODE(ptr);
+    if (!ci_list.IsSequence()) return;
+
+    for (size_t i = 0; i < ci_list.size(); i++) {
+        YAML::Node entry = ci_list[i];
+
+        ContinuumRobotStateEstimator::ControlInput ci;
+
+        // Parse type
+        std::string type_str = entry["type"].as<std::string>();
+        if (type_str == "None")
+            ci.type = ContinuumRobotStateEstimator::ControlInput::None;
+        else if (type_str == "Constant")
+            ci.type = ContinuumRobotStateEstimator::ControlInput::Constant;
+        else if (type_str == "PiecewiseLinear")
+            ci.type = ContinuumRobotStateEstimator::ControlInput::PiecewiseLinear;
+        else
+            throw std::runtime_error("control_inputs: unknown type '" + type_str +
+                                     "' (expected None, Constant, or PiecewiseLinear)");
+
+        ci.idx_robot   = entry["idx_robot"].as<int>();
+        ci.idx_segment = entry["idx_segment"].as<int>();
+
+        // Parse values (list of 12-element vectors)
+        if (entry["values"] && entry["values"].IsSequence()) {
+            for (size_t v = 0; v < entry["values"].size(); v++) {
+                auto val = entry["values"][v].as<std::vector<double>>();
+                if (val.size() != 12)
+                    throw std::runtime_error("control_inputs: each value must have 12 elements, got " +
+                                             std::to_string(val.size()));
+                Eigen::Matrix<double,12,1> vec;
+                for (int j = 0; j < 12; j++) vec(j) = val[j];
+                ci.values.push_back(vec);
+            }
+        }
+
+        // Validate value count for type
+        if (ci.type == ContinuumRobotStateEstimator::ControlInput::Constant && ci.values.size() != 1)
+            throw std::runtime_error("control_inputs: Constant type requires exactly 1 value");
+        if (ci.type == ContinuumRobotStateEstimator::ControlInput::PiecewiseLinear && ci.values.size() != 2)
+            throw std::runtime_error("control_inputs: PiecewiseLinear type requires exactly 2 values");
+
+        m_control_inputs.push_back(ci);
     }
 }
 

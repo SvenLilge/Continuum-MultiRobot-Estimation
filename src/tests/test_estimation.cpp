@@ -1,4 +1,5 @@
 // test_estimation.cpp
+// Integration tests.
 // Headless integration tests: runs computeStateEstimate() for all 5 examples.
 // No VTK / no GUI required.
 //
@@ -81,7 +82,7 @@ static void runCase(const std::string &label, const std::string &config_path, bo
 
         ContinuumRobotStateEstimator::SystemState state;
         std::vector<double> cost;
-        bool converged = estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), /*verbose=*/false);
+        bool converged = estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), {}, /*verbose=*/false);
 
         // Convergence
         if (expect_convergence)
@@ -150,7 +151,7 @@ static void check_example1_shape(const std::string &config_path)
         ContinuumRobotStateEstimator estimator(cfg.getTopology(), cfg.getHyperparameters(), cfg.getOptions());
         ContinuumRobotStateEstimator::SystemState state;
         std::vector<double> cost;
-        estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), false);
+        estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), {}, false);
 
         auto &tip = state.robots[0].estimation_nodes.back();
         double tip_norm = tip.pose.block<3, 1>(0, 3).norm();
@@ -173,7 +174,7 @@ static void check_example2_separation(const std::string &config_path)
         ContinuumRobotStateEstimator estimator(cfg.getTopology(), cfg.getHyperparameters(), cfg.getOptions());
         ContinuumRobotStateEstimator::SystemState state;
         std::vector<double> cost;
-        estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), false);
+        estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), {}, false);
 
         Eigen::Vector3d t0 = state.robots[0].estimation_nodes.back().pose.block<3, 1>(0, 3);
         Eigen::Vector3d t1 = state.robots[1].estimation_nodes.back().pose.block<3, 1>(0, 3);
@@ -197,7 +198,7 @@ static void check_example5_fbg(const std::string &config_path)
         ContinuumRobotStateEstimator estimator(cfg.getTopology(), cfg.getHyperparameters(), cfg.getOptions());
         ContinuumRobotStateEstimator::SystemState state;
         std::vector<double> cost;
-        estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), false);
+        estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), {}, false);
 
         for (unsigned int r = 0; r < 2; r++)
         {
@@ -225,7 +226,7 @@ static void test_query_additional_states(const std::string &config_path)
         ContinuumRobotStateEstimator estimator(topo, cfg.getHyperparameters(), cfg.getOptions());
         ContinuumRobotStateEstimator::SystemState state;
         std::vector<double> cost;
-        estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), false);
+        estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), {}, false);
 
         double mid = topo.L[0] / 2.0;
         estimator.queryAdditionalStates(state, {{0, mid}});
@@ -254,7 +255,7 @@ static void test_no_convergence(const std::string &config_path)
         ContinuumRobotStateEstimator estimator(cfg.getTopology(), cfg.getHyperparameters(), opts);
         ContinuumRobotStateEstimator::SystemState state;
         std::vector<double> cost;
-        bool converged = estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), false);
+        bool converged = estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), {}, false);
 
         ASSERT_TRUE(!converged, "T_noconv max_iterations=1 returns false");
     }
@@ -278,7 +279,7 @@ static void test_kirchhoff_off(const std::string &config_path)
         ContinuumRobotStateEstimator estimator(cfg.getTopology(), cfg.getHyperparameters(), opts);
         ContinuumRobotStateEstimator::SystemState state;
         std::vector<double> cost;
-        bool converged = estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), false);
+        bool converged = estimator.computeStateEstimate(state, cost, cfg.getMeasurements(), {}, false);
 
         ASSERT_TRUE(converged, "T_kirchhoff converged with kirchhoff_rods=false");
         ASSERT_TRUE(stateIsFinite(state), "T_kirchhoff state finite");
@@ -306,8 +307,8 @@ static void test_warm_start(const std::string &config_path)
         ContinuumRobotStateEstimator::SystemState state;
         std::vector<double> cost1, cost2;
 
-        estimator.computeStateEstimate(state, cost1, meas, false);
-        estimator.computeStateEstimate(state, cost2, meas, false);
+        estimator.computeStateEstimate(state, cost1, meas, {}, false);
+        estimator.computeStateEstimate(state, cost2, meas, {}, false);
 
         // With warm start the second solve should need ≤ iterations than the first
         ASSERT_TRUE(cost2.size() <= cost1.size(), "T_warm second solve needs <= iterations than first");
