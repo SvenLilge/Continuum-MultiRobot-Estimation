@@ -48,6 +48,58 @@ options:
   convergence_threshold: 0.5
   kirchhoff_rods: true
 
+control_inputs:
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 0
+    values:
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 2
+    values:
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 4
+    values:
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 6
+    values:
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 8
+    values:
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 10
+    values:
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 12
+    values:
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 14
+    values:
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 16
+    values:
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - type: Constant
+    idx_robot: 0
+    idx_segment: 18
+    values:
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
 measurements:
   # Strain measurements for first half of robot
   - type: Strain
