@@ -100,3 +100,6 @@ visualization:
   render_covariance: true
   covariance_n_std: 3
   verbose: true
+  camera_position: [0.2, 0.3, 0.5]
+  camera_focal_point: [0.1, 0.0, 0.0]
+  camera_view_up: [1.0, 0.0, 0.0]

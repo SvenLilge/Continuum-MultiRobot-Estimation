@@ -10,6 +10,7 @@
 #include <vtkRenderWindow.h>
 
 #include "continuum_robot_state_estimator.h"
+#include "config_loader.h"
 
 // VTK-based visualization utility for the estimator state.
 //
@@ -23,7 +24,9 @@ class Visualizer
 public:
     // Build and initialize the rendering scene (actors, camera, buffers).
     // The topology defines how many robots/couplings/frames must be created.
-    Visualizer(ContinuumRobotStateEstimator::RobotTopology topology);
+    // Camera position/orientation is read from vis_settings.
+    Visualizer(ContinuumRobotStateEstimator::RobotTopology topology,
+               const ConfigLoader::VisualizationSettings& vis_settings = {});
 
     // Smart pointers handle memory, so no manual cleanup is needed here.
     ~Visualizer();
@@ -44,6 +47,9 @@ private:
 
     // Copy of estimator topology used to size and index all visual objects.
     ContinuumRobotStateEstimator::RobotTopology m_topology;
+
+    // Visualization settings (camera position, etc.)
+    ConfigLoader::VisualizationSettings m_vis_settings;
 
     // Top-level VTK rendering objects.
     vtkSmartPointer<vtkRenderWindow> mp_renWin;

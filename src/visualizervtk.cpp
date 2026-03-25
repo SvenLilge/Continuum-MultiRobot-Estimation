@@ -14,7 +14,8 @@
  * Constructor.
  * @brief Visualizer::Visualizer
  */
-Visualizer::Visualizer(ContinuumRobotStateEstimator::RobotTopology topology)
+Visualizer::Visualizer(ContinuumRobotStateEstimator::RobotTopology topology,
+                       const ConfigLoader::VisualizationSettings& vis_settings)
 {
 
     mp_renWin = vtkSmartPointer<vtkRenderWindow>::New();
@@ -23,6 +24,7 @@ Visualizer::Visualizer(ContinuumRobotStateEstimator::RobotTopology topology)
     mp_renWin->AddRenderer(mp_ren);
 
     m_topology = topology;
+    m_vis_settings = vis_settings;
 
     InitScene();
 }
@@ -538,23 +540,19 @@ void Visualizer::InitScene()
 
 
     //Camera
-    mp_ren->GetActiveCamera()->SetPosition(0.2,0.3,0.5);
-    mp_ren->GetActiveCamera()->SetFocalPoint(0.1,0,0);
-    mp_ren->GetActiveCamera()->SetViewUp(1,0,0);
+    mp_ren->GetActiveCamera()->SetPosition(m_vis_settings.camera_position[0],
+                                           m_vis_settings.camera_position[1],
+                                           m_vis_settings.camera_position[2]);
+    mp_ren->GetActiveCamera()->SetFocalPoint(m_vis_settings.camera_focal_point[0],
+                                             m_vis_settings.camera_focal_point[1],
+                                             m_vis_settings.camera_focal_point[2]);
+    mp_ren->GetActiveCamera()->SetViewUp(m_vis_settings.camera_view_up[0],
+                                         m_vis_settings.camera_view_up[1],
+                                         m_vis_settings.camera_view_up[2]);
 
 
     //Update scene
     mp_renWin->Render();
-
-
-
-
-
-
-
-
-
-
 
 }
 

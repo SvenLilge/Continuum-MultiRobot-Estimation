@@ -669,4 +669,8 @@ void ConfigLoader::parseVisualization(const void* ptr)
     if (vis["render_covariance"]) m_vis_settings.render_covariance = vis["render_covariance"].as<bool>();
     if (vis["covariance_n_std"])  m_vis_settings.covariance_n_std  = vis["covariance_n_std"].as<int>();
     if (vis["verbose"])           m_vis_settings.verbose           = vis["verbose"].as<bool>();
+
+    if (vis["camera_position"])    m_vis_settings.camera_position    = vis["camera_position"].as<std::vector<double>>();
+    if (vis["camera_focal_point"]) m_vis_settings.camera_focal_point = vis["camera_focal_point"].as<std::vector<double>>();
+    if (vis["camera_view_up"])     m_vis_settings.camera_view_up     = vis["camera_view_up"].as<std::vector<double>>();
 }

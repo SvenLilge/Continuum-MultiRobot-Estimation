@@ -30,6 +30,11 @@ public:
         bool render_covariance = true;  // Draw uncertainty ellipsoids
         int  covariance_n_std  = 3;     // Ellipsoid radius in # of std deviations
         bool verbose           = true;  // Print extra info to the terminal
+
+        // Initial camera pose (defaults match the original hardcoded values)
+        std::vector<double> camera_position    = {0.2, 0.3, 0.5};
+        std::vector<double> camera_focal_point = {0.1, 0.0, 0.0};
+        std::vector<double> camera_view_up     = {1.0, 0.0, 0.0};
     };
 
     // Opens and fully parses the YAML file at config_path. Throws
