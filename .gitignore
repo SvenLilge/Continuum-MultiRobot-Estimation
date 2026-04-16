@@ -1,3 +1,7 @@
 build/*
 examples/*
 .vscode/
+
+CLAUDE.md
+
+doc/

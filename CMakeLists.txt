@@ -16,6 +16,23 @@ find_package (Eigen3 REQUIRED NO_MODULE)
 #yaml-cpp
 find_package(yaml-cpp REQUIRED)
 
+# --- Optional: link against a sibling tdcr-modeling checkout -----------------
+# Default OFF so the estimator builds standalone (no GSL required). Enable with
+# -DUSE_LOCAL_TDCR=ON to build the combined Cosserat-driven pipeline against
+# a sibling tdcr-modeling repo checkout.
+option(USE_LOCAL_TDCR "Link against sibling tdcr-modeling checkout" OFF)
+
+if (USE_LOCAL_TDCR)
+    set(TDCR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../tdcr-modeling/c++" CACHE PATH
+        "Path to the c++ subdir of a tdcr-modeling checkout")
+    if (NOT EXISTS "${TDCR_ROOT}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "USE_LOCAL_TDCR=ON but TDCR_ROOT='${TDCR_ROOT}' is not a tdcr-modeling c++ dir. "
+            "Pass -DTDCR_ROOT=<path-to-tdcr-modeling/c++> to override.")
+    endif()
+    add_subdirectory("${TDCR_ROOT}" "${CMAKE_BINARY_DIR}/tdcr_modeling_build")
+endif()
+
 #include directories
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_SOURCE_DIR}/src)
@@ -52,3 +69,24 @@ add_executable(test_estimation
 )
 target_link_libraries(test_estimation Eigen3::Eigen yaml-cpp::yaml-cpp)
 set_target_properties(test_estimation PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
+
+# --- Optional combined driver — USE_LOCAL_TDCR=ON only ----------------------
+# Cosserat FK → aux outputs → ContinuumRodPriors DTO. End-to-end build smoke
+# test of the cross-repo adapter boundary. The adapter .cpp lives in
+# src/bridge/ deliberately — outside file(GLOB src/*.cpp) — so it is NEVER
+# compiled into the standalone targets above.
+if (USE_LOCAL_TDCR)
+    add_executable(cosserat_estimator_driver
+        src/examples/cosserat_estimator_driver.cpp
+        ${H_FILES}
+        src/continuum_robot_state_estimator.cpp
+        src/continuum_rod_priors.cpp
+        src/bridge/cosserat_priors_adapter.cpp
+        src/config_loader.cpp
+        src/utilities.cpp
+    )
+    target_link_libraries(cosserat_estimator_driver
+        PRIVATE Eigen3::Eigen yaml-cpp::yaml-cpp tdcr_modeling)
+    set_target_properties(cosserat_estimator_driver PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
+endif()

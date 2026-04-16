@@ -84,6 +84,61 @@ The viewer opens a VTK window where you can adjust strain and force inputs in re
 
 ---
 
+## Optional: Combined Build with Cosserat Rod Model
+
+The estimator can receive physics-based priors (strains, distributed tendon loads, discrete loads) from the `CosseratRodModel` in the [tdcr-modeling](https://github.com/SvenLilge/tdcr-modeling) repo. This is **fully optional** — the estimator builds and runs standalone without it.
+
+### Directory layout
+
+Both repos must be sibling directories (no submodule, no special setup):
+
+```
+your-workspace/
+  tdcr-modeling/                  # clone of tdcr-modeling
+  Continuum-MultiRobot-Estimation/  # clone of this repo
+```
+
+### Additional dependency
+
+The combined build requires [GSL](https://www.gnu.org/software/gsl/) (used by the Cosserat model's ODE solver):
+
+```bash
+# macOS
+brew install gsl
+
+# Ubuntu/Debian
+sudo apt install libgsl-dev
+```
+
+### Building the combined pipeline
+
+```bash
+cd Continuum-MultiRobot-Estimation
+mkdir build && cd build
+cmake -G Ninja -DUSE_LOCAL_TDCR=ON ..
+cmake --build .
+```
+
+This builds everything from the standalone mode **plus** a `cosserat_estimator_driver` that runs the full pipeline: Cosserat FK → extract auxiliary outputs → pack into `ContinuumRodPriors` DTO.
+
+```bash
+./examples/cosserat_estimator_driver
+```
+
+If the repos are not in sibling directories, pass the tdcr path explicitly:
+
+```bash
+cmake -G Ninja -DUSE_LOCAL_TDCR=ON -DTDCR_ROOT=/path/to/tdcr-modeling/c++ ..
+```
+
+### How it works
+
+The `ContinuumRodPriors` struct (pure Eigen, no tdcr dependency) acts as the data boundary between the two repos. A thin adapter copies the Cosserat model's outputs into this struct; the estimator consumes it. See `doc/implementation_summary_for_supervisor.md` in the tdcr-modeling repo for the full architecture.
+
+When `USE_LOCAL_TDCR=OFF` (the default), none of the above applies — no GSL, no tdcr checkout, no extra targets. The standalone build is unchanged.
+
+---
+
 ## Running the Tests
 
 ```bash

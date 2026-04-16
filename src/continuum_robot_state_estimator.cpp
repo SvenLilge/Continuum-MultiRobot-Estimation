@@ -1,6 +1,7 @@
 #include "continuum_robot_state_estimator.h"
 #include "utilities.h"
 
+#include <cassert>
 #include <numeric>
 #include <algorithm>
 #include <iostream>
