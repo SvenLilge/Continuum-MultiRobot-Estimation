@@ -1,0 +1,71 @@
+# Configuration for Example 6: Cosserat-driven priors.
+#
+# Drives the estimator with Cosserat rod model outputs (strains, control
+# inputs, initial pose guess) injected programmatically by
+# cosserat_estimator_driver. The measurements and control_inputs lists below
+# are deliberately empty — the driver fills them from the Cosserat model at
+# runtime via cosseratPriorsToEstimator().
+#
+# Requires USE_LOCAL_TDCR=ON when building. See doc/bridge_adapter_guide.md and
+# doc/cosserat_integration_results.md.
+
+topology:
+  N: 1                          # single robot
+  K: [11]                       # 11 estimator nodes, step = 0.02 m; aligns with
+                                # Cosserat sample arclengths so resampling avoids
+                                # interpolation across the junction discontinuity at s=0.1
+  M: [2]                        # interpolation nodes between estimator nodes (rendering only)
+  L: [0.20]                     # total arclength = L1 + L2 = 0.1 + 0.1
+
+  lock_first_pose: [true]
+  lock_last_pose: [false]
+  lock_first_strain: [false]
+  lock_last_strain: [false]
+
+  fbg_theta_offset: [0]
+  fbg_core_distance: [0]
+
+  common_end_effector: false
+
+  # Base frame. Identity places robot in the world x-forward convention the
+  # estimator expects. The adapter converts Cosserat z-forward poses into
+  # this frame before injection.
+  Ti0:
+    - type: identity
+
+  robot_coupling: []
+
+hyperparameters:
+  noise_std:
+    R_p: 0.002                  # position noise
+    R_o: 0.05                   # orientation noise
+    R_v: 0.01                   # translational strain noise (lower => trust Cosserat priors more)
+    R_u: 0.01                   # rotational strain noise
+    R_fbg: 1.0e-5
+
+  R_pose_scale: 2.0
+  R_strain_scale: 1.0           # strain measurements weighted directly
+  R_fbg_strain_scale: 20.0
+  R_coupling_scale: 1.0e-10
+  R_coupling_diagonal: [1, 1, 1, 1, 1, 1]
+  Qc_scale: 1.0
+  Qc_diagonal: [0.1, 0.1, 0.1, 1.0, 1.0, 1.0]
+
+options:
+  initial_guess: Custom         # driver fills custom_guess from Cosserat disk frames
+  solver: Newton
+  max_iterations: 100
+  convergence_threshold: 1.0e-3
+  kirchhoff_rods: true
+
+# Driver-filled at runtime from Cosserat outputs.
+control_inputs: []
+measurements: []
+
+visualization:
+  window_width: 1280
+  window_height: 720
+  render_frames: true
+  render_covariance: true
+  covariance_n_std: 3
+  verbose: true

@@ -69,6 +69,8 @@ A single viewer executable takes any YAML configuration file as argument:
 | `4_collaborative_continuum_robots.yaml` | Three collaborating robots with coupling constraints |
 | `5_fbg_measurements.yaml` | Two robots with FBG sensors (data from CSV) |
 
+Config `6_cosserat_priors.yaml` is **not** runnable through the viewer — its measurements, control inputs, and initial guess are populated at runtime by `cosserat_estimator_driver`. See [Running the combined driver](#running-the-combined-driver) below.
+
 ### Interactive controls
 
 The viewer opens a VTK window where you can adjust strain and force inputs in real time:
@@ -86,21 +88,25 @@ The viewer opens a VTK window where you can adjust strain and force inputs in re
 
 ## Optional: Combined Build with Cosserat Rod Model
 
-The estimator can receive physics-based priors (strains, distributed tendon loads, discrete loads) from the `CosseratRodModel` in the [tdcr-modeling](https://github.com/SvenLilge/tdcr-modeling) repo. This is **fully optional** — the estimator builds and runs standalone without it.
+The estimator can be driven by **physics-based priors** from the `CosseratRodModel` in the [tdcr-modeling](https://github.com/SvenLilge/tdcr-modeling) repo — strains, strain derivatives, and disk-frame poses predicted from tendon tensions. This lets the estimator infer the rod's full deformation field without needing physical sensors on every node. The integration is **fully optional** and opt-in; the default standalone build is unchanged (no GSL, no tdcr checkout required).
+
+### What the combined pipeline does
+
+Given tendon tensions, the Cosserat model solves the quasi-static rod equilibrium and produces strains `(v, u)`, their s-derivatives `(v̇, u̇)`, and disk frames along the backbone. A thin **adapter** (in `src/bridge/`) converts these into three estimator inputs: (1) per-node strain *pseudo-measurements*, (2) per-segment GP-prior *control inputs*, and (3) a *custom initial guess* built from the disk frames. The estimator then runs its usual MAP optimization — now seeded with physics. 
 
 ### Directory layout
 
-Both repos must be sibling directories (no submodule, no special setup):
+Both repos must be **sibling directories** (no submodule, no special setup):
 
 ```
 your-workspace/
-  tdcr-modeling/                  # clone of tdcr-modeling
-  Continuum-MultiRobot-Estimation/  # clone of this repo
+  tdcr-modeling/                     # clone of tdcr-modeling
+  Continuum-MultiRobot-Estimation/   # clone of this repo
 ```
 
 ### Additional dependency
 
-The combined build requires [GSL](https://www.gnu.org/software/gsl/) (used by the Cosserat model's ODE solver):
+The combined build requires [GSL](https://www.gnu.org/software/gsl/) (used by the Cosserat model's ODE solver — not needed by the standalone build):
 
 ```bash
 # macOS
@@ -112,30 +118,76 @@ sudo apt install libgsl-dev
 
 ### Building the combined pipeline
 
+Ninja is strongly preferred — the Unix Makefiles generator has been observed to occasionally fail creating intermediate output directories for sources under `src/examples/` and `src/bridge/`.
+
 ```bash
 cd Continuum-MultiRobot-Estimation
 mkdir build && cd build
-cmake -G Ninja -DUSE_LOCAL_TDCR=ON ..
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_LOCAL_TDCR=ON ..
 cmake --build .
 ```
 
-This builds everything from the standalone mode **plus** a `cosserat_estimator_driver` that runs the full pipeline: Cosserat FK → extract auxiliary outputs → pack into `ContinuumRodPriors` DTO.
+If the two repos are **not** in sibling directories, point CMake at the tdcr path explicitly:
 
 ```bash
-./examples/cosserat_estimator_driver
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_LOCAL_TDCR=ON \
+      -DTDCR_ROOT=/path/to/tdcr-modeling/c++ ..
 ```
 
-If the repos are not in sibling directories, pass the tdcr path explicitly:
+The combined build produces two **additional** executables on top of the standalone targets:
+
+| Executable | Role |
+|---|---|
+| `cosserat_estimator_driver` | End-to-end demo: Cosserat FK → adapter → state estimator → per-node strain comparison table. Optional VTK visualization. |
+| `test_cosserat_adapter` | Four validation tests (frame permutation, arclength resampling, end-to-end convergence, prior-vs-no-prior A/B). |
+
+### Running the combined driver
+
+Run from the repo root (not from `build/`) — executables are placed in `examples/`:
 
 ```bash
-cmake -G Ninja -DUSE_LOCAL_TDCR=ON -DTDCR_ROOT=/path/to/tdcr-modeling/c++ ..
+./examples/cosserat_estimator_driver config/6_cosserat_priors.yaml
 ```
 
-### How it works
+You will see:
+1. Cosserat FK convergence (residual ≈ 1e-19).
+2. Adapter summary (how many measurements / control inputs / initial-guess nodes it produced).
+3. Estimator Newton iterations and final cost.
+4. A per-node strain-comparison table: **Cosserat prior vs Estimator result** for all 6 strain components (ν₁–ν₃, ω₁–ω₃).
+5. `max |diff|` per component and overall — expect ~5e-3 rad/m on the worst node (junction) and ~1e-8 everywhere else.
 
-The `ContinuumRodPriors` struct (pure Eigen, no tdcr dependency) acts as the data boundary between the two repos. A thin adapter copies the Cosserat model's outputs into this struct; the estimator consumes it. See `doc/implementation_summary_for_supervisor.md` in the tdcr-modeling repo for the full architecture.
+**Flags** (both optional):
 
-When `USE_LOCAL_TDCR=OFF` (the default), none of the above applies — no GSL, no tdcr checkout, no extra targets. The standalone build is unchanged.
+| Flag | Effect |
+|---|---|
+| `--visualize` | After the estimator run, open a VTK window with the backbone, coordinate frames, and covariance ellipsoids. Mouse drag rotates, scroll zooms, close to exit. |
+| `--no-control-inputs` | Skip the adapter's GP-prior control inputs. Useful for A/B comparing "measurements + initial guess only" against the full-prior run. |
+
+Example: estimator run with visualization enabled:
+
+```bash
+./examples/cosserat_estimator_driver config/6_cosserat_priors.yaml --visualize
+```
+
+### Running the validation tests
+
+```bash
+./examples/test_cosserat_adapter                             # defaults to config/6_cosserat_priors.yaml
+./examples/test_cosserat_adapter config/6_cosserat_priors.yaml
+```
+
+Expected output: `=== Results: 4 passed, 0 failed ===`, including the prior-vs-no-prior line:
+
+```
+mean |diff|  no-prior = 0.223755
+mean |diff|  prior    = 0.000233825
+```
+
+### How it works (architecture)
+
+The `ContinuumRodPriors` DTO (Data Transfer Object — pure Eigen + STL, header [`include/continuum_rod_priors.h`](include/continuum_rod_priors.h)) is the **data boundary** between the two repos — no estimator-side header `#include`s anything from tdcr-modeling. The Cosserat-specific adapter lives in `src/bridge/` so it is compiled **only** when `USE_LOCAL_TDCR=ON`. Any future rod model (PCC, analytical, sub-segment Cosserat, …) can produce a `ContinuumRodPriors` with no estimator-side changes.
+
+When `USE_LOCAL_TDCR=OFF` (the default), none of the above applies — no GSL, no tdcr checkout, no extra targets, and the standalone build is byte-identical to the pre-integration behavior.
 
 ---
 
@@ -150,6 +202,12 @@ Both accept an optional argument to override the project root path (default: `..
 
 ```bash
 ./examples/test_config_loader /path/to/project
+```
+
+The combined build (`USE_LOCAL_TDCR=ON`) adds a third test executable:
+
+```bash
+./examples/test_cosserat_adapter     # Cosserat adapter + integration tests (4 checks)
 ```
 
 ---
