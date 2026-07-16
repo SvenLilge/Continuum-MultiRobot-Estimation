@@ -1,0 +1,90 @@
+# Configuration for Example 2: Parallel Continuum Robot
+# Two parallel robots coupled at a common end-effector.
+
+topology:
+  N: 2
+  K: [21, 21]
+  M: [2, 2]
+  L: [0.20, 0.20]
+
+  lock_first_pose: [true, true]
+  lock_last_pose: [false, false]
+  lock_first_strain: [false, false]
+  lock_last_strain: [true, true]
+
+  fbg_theta_offset: [0, 0]
+  fbg_core_distance: [0, 0]
+
+  common_end_effector: true
+
+  Ti0:
+    - type: translation
+      xyz: [0, 0.05, 0]
+    - type: translation
+      xyz: [0, -0.05, 0]
+
+  robot_coupling:
+    # Robot 0 coupled to end-effector (idx 2)
+    - idxA: 0
+      idxB: 2
+      coupling_node_robot_A: 20   # K[0]-1
+      coupling_node_robot_B: 0
+      T_bA_c:
+        type: identity
+      T_bB_c:
+        type: translation
+        xyz: [0, 0.05, 0]
+      mask: [1, 1, 1, 1, 1, 1]
+
+    # Robot 1 coupled to end-effector (idx 2)
+    - idxA: 1
+      idxB: 2
+      coupling_node_robot_A: 20   # K[1]-1
+      coupling_node_robot_B: 0
+      T_bA_c:
+        type: identity
+      T_bB_c:
+        type: translation
+        xyz: [0, -0.05, 0]
+      mask: [1, 1, 1, 1, 1, 1]
+
+hyperparameters:
+  noise_std:
+    R_p: 0.002
+    R_o: 0.05
+    R_v: 0.05
+    R_u: 0.05
+    R_fbg: 1.0e-5
+
+  R_pose_scale: 2.0
+  R_strain_scale: 10.0
+  R_fbg_strain_scale: 20.0
+  R_coupling_scale: 1.0e-10
+  R_coupling_diagonal: [1, 1, 1, 1, 1, 1]
+  Qc_scale: 4.0
+  Qc_diagonal: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+options:
+  initial_guess: Straight
+  solver: NewtonLineSearch
+  max_iterations: 200
+  convergence_threshold: 0.5
+  kirchhoff_rods: true
+
+measurements:
+  # Pose measurement at the end-effector
+  - type: Pose
+    idx_robot: 2                  # End-effector index = N
+    idx_node: 0
+    mask: [1, 1, 1, 0, 0, 0]     # Position only
+    value:
+      type: translation
+      xyz: [0.1273, 0, 0.1273]
+
+visualization:
+  window_width: 1280
+  window_height: 720
+  render_frames: true
+  render_covariance: true
+  covariance_n_std: 3
+  verbose: true

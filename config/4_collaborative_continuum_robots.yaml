@@ -1,0 +1,110 @@
+# Configuration for Example 4: Collaborative Continuum Robots
+# Three robots: one long backbone with two shorter helper robots attached.
+
+topology:
+  N: 3
+  K: [31, 16, 16]
+  M: [3, 3, 3]
+  L: [0.30, 0.15, 0.15]
+
+  lock_first_pose:   [true, true, true]
+  lock_last_pose:    [false, false, false]
+  lock_first_strain: [false, false, false]
+  lock_last_strain:  [false, false, false]
+
+  fbg_theta_offset:  [0, 0, 0]
+  fbg_core_distance: [0, 0, 0]
+
+  common_end_effector: false
+
+  Ti0:
+    # Robot 0: identity
+    - type: identity
+
+    # Robot 1: 90 deg rotation about z + translation
+    - type: matrix
+      data:
+        - [0,  1, 0, 0.1]
+        - [-1, 0, 0, 0.1]
+        - [0,  0, 1, 0.0]
+        - [0,  0, 0, 1.0]
+
+    # Robot 2: -90 deg rotation about z + translation
+    - type: matrix
+      data:
+        - [0, -1, 0, 0.2]
+        - [1,  0, 0, -0.1]
+        - [0,  0, 1, 0.0]
+        - [0,  0, 0, 1.0]
+
+  robot_coupling:
+    # Robot 1 tip coupled to midpoint of robot 0
+    - idxA: 1
+      idxB: 0
+      coupling_node_robot_A: 15   # K[1]-1
+      coupling_node_robot_B: 13   # (K[0]-4)/2 = (31-4)/2 = 13
+      T_bA_c: { type: identity }
+      T_bB_c:
+        type: matrix
+        data:
+          - [0,  1, 0, 0]
+          - [-1, 0, 0, 0]
+          - [0,  0, 1, 0]
+          - [0,  0, 0, 1]
+      mask: [1, 1, 1, 1, 1, 1]
+
+    # Robot 2 tip coupled to 3/4 point of robot 0
+    - idxA: 2
+      idxB: 0
+      coupling_node_robot_A: 15   # K[2]-1
+      coupling_node_robot_B: 27   # K[0]-4 = 31-4 = 27
+      T_bA_c: { type: identity }
+      T_bB_c:
+        type: matrix
+        data:
+          - [0, -1, 0, 0]
+          - [1,  0, 0, 0]
+          - [0,  0, 1, 0]
+          - [0,  0, 0, 1]
+      mask: [1, 1, 1, 1, 1, 1]
+
+hyperparameters:
+  noise_std:
+    R_p: 0.002
+    R_o: 0.05
+    R_v: 0.05
+    R_u: 0.05
+    R_fbg: 1.0e-5
+
+  R_pose_scale: 1.0
+  R_strain_scale: 10.0
+  R_fbg_strain_scale: 20.0
+  R_coupling_scale: 0.5e-6
+  R_coupling_diagonal: [1, 1, 1, 1, 1, 1]
+  Qc_scale: 1.0
+  Qc_diagonal: [0.1, 0.1, 0.1, 100.0, 100.0, 100.0]
+
+options:
+  initial_guess: Straight
+  solver: NewtonLineSearch
+  max_iterations: 200
+  convergence_threshold: 50.0
+  kirchhoff_rods: true
+
+measurements:
+  # Pose measurement at tip of robot 0
+  - type: Pose
+    idx_robot: 0
+    idx_node: 30
+    mask: [1, 1, 1, 0, 0, 0]     # Position only
+    value:
+      type: translation
+      xyz: [0.2, 0.05, 0]
+
+visualization:
+  window_width: 1280
+  window_height: 720
+  render_frames: true
+  render_covariance: true
+  covariance_n_std: 3
+  verbose: true

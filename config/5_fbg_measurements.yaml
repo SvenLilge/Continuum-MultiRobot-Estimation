@@ -1,0 +1,102 @@
+# Configuration for Example 5: FBG Measurements
+# Two robots with Fiber Bragg Grating strain sensors.
+# FBG measurements are loaded from CSV data files.
+
+topology:
+  N: 2
+  K: [25, 21]
+  M: [3, 3]
+  L: [0.24, 0.2]
+
+  lock_first_pose:   [true, true]
+  lock_last_pose:    [false, false]
+  lock_first_strain: [false, false]
+  lock_last_strain:  [false, false]
+
+  # FBG sensor parameters
+  fbg_core_distance: [37.534162e-6, 37.534162e-6]     # Distance of fiber cores (meters)
+  fbg_theta_offset:  [-0.2516, -0.7194]               # Angular offset of fibers (radians)
+
+  common_end_effector: true
+
+  Ti0:
+    # Robot 0: identity base frame
+    - type: identity
+    # Robot 1: base loaded from CSV with orthonormalization
+    - type: csv_file
+      path: "../data/base_2.csv"
+      orthonormalize: true
+
+  robot_coupling:
+    # Robot 0 coupled to end-effector with z-offset
+    - idxA: 0
+      idxB: 2
+      coupling_node_robot_A: 24   # K[0]-1
+      coupling_node_robot_B: 0
+      T_bA_c: { type: identity }
+      T_bB_c:
+        type: matrix
+        data:
+          - [1, 0, 0, 0]
+          - [0, 1, 0, 0]
+          - [0, 0, 1, 0.05]
+          - [0, 0, 0, 1]
+      mask: [1, 1, 1, 1, 1, 1]
+
+    # Robot 1 coupled to end-effector with negative z-offset
+    - idxA: 1
+      idxB: 2
+      coupling_node_robot_A: 20   # K[1]-1
+      coupling_node_robot_B: 0
+      T_bA_c: { type: identity }
+      T_bB_c:
+        type: matrix
+        data:
+          - [1, 0, 0, 0]
+          - [0, 1, 0, 0]
+          - [0, 0, 1, -0.05]
+          - [0, 0, 0, 1]
+      mask: [1, 1, 1, 1, 1, 1]
+
+hyperparameters:
+  noise_std:
+    R_p: 0.002
+    R_o: 0.05
+    # R_v and R_u not set — R_strain will not be used
+    R_fbg: 1.0e-4                  # 10 * 1e-5
+
+  R_pose_scale: 0.1
+  R_fbg_strain_scale: 2.0
+  R_coupling_scale: 0.1
+  R_coupling_diagonal: [1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6]
+  Qc_scale: 0.1
+  Qc_diagonal: [0.01, 0.01, 0.01, 1000.0, 1000.0, 1000.0]
+
+options:
+  initial_guess: Straight
+  solver: NewtonLineSearch
+  max_iterations: 50
+  convergence_threshold: 50.0
+  kirchhoff_rods: true
+
+measurements:
+  # FBG strain measurements from CSV files
+  - type: FBGStrain
+    idx_robot: 0
+    source: csv_file
+    path: "../data/fbg_strains_1.csv"
+    mask: [1, 1, 1, 1, 1, 1]
+
+  - type: FBGStrain
+    idx_robot: 1
+    source: csv_file
+    path: "../data/fbg_strains_2.csv"
+    mask: [1, 1, 1, 1, 1, 1]
+
+visualization:
+  window_width: 1280
+  window_height: 720
+  render_frames: true
+  render_covariance: true
+  covariance_n_std: 3
+  verbose: true
