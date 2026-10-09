@@ -36,6 +36,16 @@ struct ContinuumRodPriors
     Eigen::MatrixXd f_dist;                    // (N,3)
     Eigen::MatrixXd l_dist;                    // (N,3)
 
+    // Strain derivative caused by the distributed loads:
+    // -K^-1 * [f_body; l_body], K = diag(K_se, K_bt). This is the
+    // acceleration-level control input, written in the physical sign
+    // convention the estimator API expects.
+    // Producer body frame (e.g. Cosserat z-forward); the adapter to the
+    // estimator applies the body-convention permutation. Optional; empty or
+    // (N,6). Populated by a producer that exposes both K and distributed
+    // wrenches (e.g. priorsFromCosseratModel).
+    Eigen::MatrixXd epsilon_in_accel;          // (N,6)
+
     // Concentrated loads at specific arclengths (world frame). Optional.
     // For tendon-driven rods, typical entries are at segment junctions and
     // at the tip where tendons terminate. All three arrays must have the
@@ -43,6 +53,11 @@ struct ContinuumRodPriors
     std::vector<double>          s_discrete;
     std::vector<Eigen::Vector3d> F_discrete;
     std::vector<Eigen::Vector3d> L_discrete;
+
+    // Strain jump across each concentrated load:
+    // eps(s+) - eps(s-) = -K^-1 * [R^T F; R^T L].
+    // Producer body frame. Optional; empty or one entry per s_discrete.
+    std::vector<Eigen::Matrix<double,6,1>> epsilon_jump_discrete;
 
     // Minimal shape-consistency check. Throws std::invalid_argument on mismatch.
     // Called at the adapter boundary so garbage never reaches the estimator.

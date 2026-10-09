@@ -5,17 +5,24 @@
 
 namespace {
 
-// Optional field: either empty (not populated) OR exactly (N x 3).
-void require_Nx3_or_empty(const Eigen::MatrixXd& m, Eigen::Index N, const char* name)
+// Optional field: either empty (not populated) OR exactly (N x cols).
+void require_NxC_or_empty(const Eigen::MatrixXd& m, Eigen::Index N,
+                          Eigen::Index cols, const char* name)
 {
     if (m.size() == 0) return;
-    if (m.rows() != N || m.cols() != 3) {
+    if (m.rows() != N || m.cols() != cols) {
         std::ostringstream oss;
         oss << "ContinuumRodPriors::validate: field \"" << name
             << "\" has shape (" << m.rows() << "x" << m.cols()
-            << "), expected (" << N << "x3).";
+            << "), expected (" << N << "x" << cols << ").";
         throw std::invalid_argument(oss.str());
     }
+}
+
+inline void require_Nx3_or_empty(const Eigen::MatrixXd& m, Eigen::Index N,
+                                 const char* name)
+{
+    require_NxC_or_empty(m, N, 3, name);
 }
 
 } // anonymous namespace
@@ -48,6 +55,7 @@ void ContinuumRodPriors::validate() const
     require_Nx3_or_empty(m_internal, N, "m_internal");
     require_Nx3_or_empty(f_dist,     N, "f_dist");
     require_Nx3_or_empty(l_dist,     N, "l_dist");
+    require_NxC_or_empty(epsilon_in_accel, N, 6, "epsilon_in_accel");
 
     // s must be monotonically non-decreasing.
     for (Eigen::Index i = 1; i < N; ++i) {
@@ -67,6 +75,12 @@ void ContinuumRodPriors::validate() const
         oss << "ContinuumRodPriors::validate: discrete arrays have mismatched "
             << "sizes (s=" << M << ", F=" << F_discrete.size()
             << ", L=" << L_discrete.size() << ").";
+        throw std::invalid_argument(oss.str());
+    }
+    if (!epsilon_jump_discrete.empty() && epsilon_jump_discrete.size() != M) {
+        std::ostringstream oss;
+        oss << "ContinuumRodPriors::validate: epsilon_jump_discrete has "
+            << epsilon_jump_discrete.size() << " entries, expected 0 or " << M << ".";
         throw std::invalid_argument(oss.str());
     }
 }

@@ -1,6 +1,6 @@
 // Combined driver: CosseratRodModel FK -> ContinuumRodPriors -> estimator.
-// Requires USE_LOCAL_TDCR=ON. See doc/bridge_adapter_guide.md for the runtime
-// walkthrough and doc/cosserat_integration_results.md for measured A/B results.
+// Requires USE_LOCAL_TDCR=ON. See doc/cosserat_integration.md for how the bridge
+// works and for the measured A/B results.
 //
 // Pipeline:
 //   1. Load YAML config.
@@ -8,13 +8,16 @@
 //   3. Extract ContinuumRodPriors DTO (Data Transfer Object).
 //   4. Convert to estimator-ready measurements + control inputs + initial guess.
 //   5. Run computeStateEstimate().
-//   6. Print per-node strain comparison: Cosserat prediction vs estimator result.
+//   6. Print per-node strain and position comparison: Cosserat vs estimator.
+//      The position check is the decisive one: a strain-only check cannot see
+//      a wrong shape when control inputs are used (state strain = bias only).
 //   7. If --visualize is passed, render the estimator's SystemState in VTK.
 //
 // Flags:
 //   --visualize            open a VTK window showing the backbone + frames + cov.
-//   --no-control-inputs    skip the adapter's ControlInput injection (for
-//                          A/B comparison of prior vs measurement influence).
+//   --no-control-inputs    feed the model strain as strain measurements
+//                          (ControlInputMode::None) instead of as a velocity
+//                          input (ControlInputMode::StrainAsInput, default).
 
 #include "config_loader.h"
 #include "continuum_robot_state_estimator.h"
@@ -69,16 +72,34 @@ int main(int argc, char* argv[])
 {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0]
-                  << " <config.yaml> [--visualize] [--no-control-inputs]\n";
+                  << " <config.yaml> [--visualize] [--no-control-inputs]"
+                  << " [--q F1,F2,F3,F4,F5,F6]\n";
         return 1;
     }
     const std::string config_path = argv[1];
     bool use_control_inputs = true;
     bool visualize          = false;
+    // Default tendon tensions; overridable via --q so the viewer can show the
+    // same S-shape the evaluation driver uses (q = 6,0,0,0,8,8 N).
+    Eigen::Matrix<double, 6, 1> q;
+    q << 0.5, 0.2, 0.0, 0.3, 0.0, 0.1;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if      (a == "--no-control-inputs") use_control_inputs = false;
         else if (a == "--visualize")         visualize          = true;
+        else if (a == "--q") {
+            if (i + 1 >= argc) {
+                std::cerr << "--q requires 6 comma-separated values\n";
+                return 1;
+            }
+            std::string vals = argv[++i];
+            for (char& c : vals) if (c == ',') c = ' ';
+            std::istringstream is(vals);
+            if (!(is >> q(0) >> q(1) >> q(2) >> q(3) >> q(4) >> q(5))) {
+                std::cerr << "--q must be 6 comma-separated numbers\n";
+                return 1;
+            }
+        }
         else {
             std::cerr << "Unknown flag: " << a << "\n";
             return 1;
@@ -103,8 +124,7 @@ int main(int argc, char* argv[])
     // --- 2. Run Cosserat FK --------------------------------------------------
     CosseratRodModel model;
     Eigen::MatrixXd diskFrames;
-    Eigen::Matrix<double, 6, 1> q;
-    q << 0.5, 0.2, 0.0, 0.3, 0.0, 0.1;          // default tendon tensions [N]
+    // q was parsed from CLI above (default = [0.5, 0.2, 0, 0.3, 0, 0.1] N).
     const Eigen::Vector3d f_ext = Eigen::Vector3d::Zero();
     const Eigen::Vector3d l_ext = Eigen::Vector3d::Zero();
     const double L1 = 0.1, L2 = 0.1;            // default Cosserat segment lengths
@@ -123,11 +143,13 @@ int main(int argc, char* argv[])
     std::cout << "  Converged:         residual = " << fmtSci(model.getFinalResudial()) << "\n\n";
 
     // --- 3. Extract DTO (Data Transfer Object) ------------------------------
-    const ContinuumRodPriors priors = priorsFromCosseratModel(model, L1, L2);
+    const ContinuumRodPriors priors = priorsFromCosseratModel(model, L1, L2, diskFrames);
 
     // --- 4. Convert to estimator inputs -------------------------------------
     const unsigned int robot_idx = 0;
-    const EstimatorPriors ep = cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames);
+    const ControlInputMode mode =
+        use_control_inputs ? ControlInputMode::StrainAsInput : ControlInputMode::None;
+    const EstimatorPriors ep = cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames, mode);
 
     std::cout << "Adapter (Cosserat -> Estimator)\n";
     std::cout << "  Strain measurements:  " << ep.measurements.size() << "\n";
@@ -139,12 +161,11 @@ int main(int argc, char* argv[])
     // config/6_cosserat_priors.yaml, but user may add FBG / pose measurements later).
     measurements.insert(measurements.end(),
                         ep.measurements.begin(), ep.measurements.end());
-    if (use_control_inputs) {
-        control_inputs.insert(control_inputs.end(),
-                              ep.control_inputs.begin(), ep.control_inputs.end());
-    } else {
-        std::cout << "  (--no-control-inputs: skipping adapter control inputs)\n";
-    }
+    control_inputs.insert(control_inputs.end(),
+                          ep.control_inputs.begin(), ep.control_inputs.end());
+    std::cout << (use_control_inputs
+        ? "  Mode: model strain as velocity input; state strain = bias, target 0\n"
+        : "  Mode: model strain as strain measurements (--no-control-inputs)\n");
 
     // Seed the estimator's optimizer with the Cosserat-predicted poses.
     options.custom_guess = ep.initial_guess;
@@ -174,12 +195,12 @@ int main(int argc, char* argv[])
     std::cout << "Per-node strain comparison (Cosserat permuted to estimator body frame)\n\n";
 
     // Cosserat side table
-    std::cout << "  Cosserat prior\n";
+    std::cout << "  Cosserat model strain\n";
     std::cout << "    k   s[m]  ";
     for (int c = 0; c < 6; ++c) std::cout << std::setw(10) << labels[c];
     std::cout << "\n";
     for (int k = 0; k < K; ++k) {
-        const Eigen::Matrix<double,6,1> s_cos = ep.measurements.at(k).value;
+        const Eigen::Matrix<double,6,1> s_cos = ep.model_strain.at(k);
         std::cout << "   " << std::setw(2) << k << "  "
                   << fmt(nodes.at(k).arclength, 5, 3);
         for (int c = 0; c < 6; ++c) std::cout << " " << fmt(s_cos(c), 9, 4);
@@ -187,7 +208,9 @@ int main(int argc, char* argv[])
     }
 
     // Estimator side table
-    std::cout << "\n  Estimator result\n";
+    std::cout << (use_control_inputs
+        ? "\n  Estimator state strain (bias; total = bias + velocity input, target bias = 0)\n"
+        : "\n  Estimator state strain\n");
     std::cout << "    k   s[m]  ";
     for (int c = 0; c < 6; ++c) std::cout << std::setw(10) << labels[c];
     std::cout << "\n";
@@ -199,23 +222,44 @@ int main(int argc, char* argv[])
         std::cout << "\n";
     }
 
-    // Per-component max-abs diff across all nodes
+    // Per-component max-abs diff between state strain and its target across all nodes
     Eigen::Matrix<double,6,1> max_diff_per_component = Eigen::Matrix<double,6,1>::Zero();
     double max_diff = 0.0;
     for (int k = 0; k < K; ++k) {
-        const Eigen::Matrix<double,6,1> s_cos = ep.measurements.at(k).value;
+        const Eigen::Matrix<double,6,1> s_cos = ep.measurements.at(k).value;  // target
         const Eigen::Matrix<double,6,1> s_est = nodes.at(k).strain;
         const Eigen::Matrix<double,6,1> d = (s_cos - s_est).cwiseAbs();
         max_diff_per_component = max_diff_per_component.cwiseMax(d);
         max_diff = std::max(max_diff, d.maxCoeff());
     }
 
-    std::cout << "\n  Max |diff| per component across all nodes:\n    ";
+    std::cout << "\n  Max |state strain - target| per component across all nodes:\n    ";
     for (int c = 0; c < 6; ++c)
         std::cout << labels[c] << "=" << fmtSci(max_diff_per_component(c), 10, 2) << "  ";
     std::cout << "\n  Max |diff|_inf overall: " << fmtSci(max_diff) << "\n\n";
 
-    printBanner("Pipeline OK");
+    // Position comparison: estimated node positions vs the Cosserat shape
+    // (the initial guess holds the Cosserat poses at the estimator nodes).
+    const auto& ref_nodes = ep.initial_guess.robots.at(robot_idx).estimation_nodes;
+    std::cout << "Per-node position comparison [mm]\n";
+    std::cout << "    k   s[m]          Cosserat p                 estimate p           |err|\n";
+    double max_pos_err_mm = 0.0;
+    for (int k = 0; k < K; ++k) {
+        const Eigen::Vector3d p_cos = ref_nodes.at(k).pose.block<3,1>(0,3) * 1e3;
+        const Eigen::Vector3d p_est = nodes.at(k).pose.block<3,1>(0,3) * 1e3;
+        const double err = (p_cos - p_est).norm();
+        max_pos_err_mm = std::max(max_pos_err_mm, err);
+        std::cout << "   " << std::setw(2) << k << "  " << fmt(nodes.at(k).arclength, 5, 3) << "  ";
+        for (int c = 0; c < 3; ++c) std::cout << fmt(p_cos(c), 8, 2);
+        std::cout << "  ";
+        for (int c = 0; c < 3; ++c) std::cout << fmt(p_est(c), 8, 2);
+        std::cout << fmt(err, 9, 3) << "\n";
+    }
+    std::cout << "\n  Max position error: " << fmt(max_pos_err_mm, 0, 3) << " mm\n\n";
+
+    // 2 mm allows for the junction smoothing (~1.1 mm at the tip in mode None).
+    const bool shape_ok = max_pos_err_mm < 2.0;
+    printBanner(shape_ok ? "Pipeline OK" : "Pipeline FAILED: estimated shape does not match Cosserat");
 
     // --- 7. Optional visualization -----------------------------------------
     if (visualize) {
@@ -235,5 +279,6 @@ int main(int argc, char* argv[])
         iren->Start();
     }
 
+    if (!shape_ok) return 3;
     return est_ok ? 0 : 2;
 }

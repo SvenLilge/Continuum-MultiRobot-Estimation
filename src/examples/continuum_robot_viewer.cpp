@@ -11,6 +11,7 @@
 #include <vtkTextProperty.h>
 
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 
 // VTK Factory initialisation (for VTK version above 6)
