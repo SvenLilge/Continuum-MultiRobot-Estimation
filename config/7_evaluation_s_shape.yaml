@@ -1,0 +1,78 @@
+# Configuration for Example 7: S-shape evaluation with tip-force disturbance.
+#
+# Drives evaluation_cosserat_priors which runs three Cosserat solves and
+# three estimator passes:
+#
+#   Cosserat (prior, f_ext = 0)   -> ContinuumRodPriors fed to the estimator
+#   Cosserat (real,  f_ext != 0)  -> ground-truth shape (held out from estimator)
+#   noisy(p_tip_real)             -> the only sensor input
+#
+# Then for each method we run computeStateEstimate():
+#   1. Baseline              : noisy tip only, no Cosserat priors, Straight init guess
+#   2. Strain as measurement : noisy tip + Cosserat strain measurements, Cosserat init guess
+#   3. Force as input        : noisy tip + Cosserat control inputs,      Cosserat init guess
+#
+# Requires USE_LOCAL_TDCR=ON. The measurements and control_inputs lists are
+# deliberately empty — the driver fills them at runtime.
+
+topology:
+  N: 1                          # single robot
+  K: [11]                       # 11 estimator nodes, step 0.02 m; aligns with
+                                # Cosserat disk arclengths to avoid interpolation
+                                # across the junction at s = 0.1
+  M: [2]                        # interpolation nodes (rendering only)
+  L: [0.20]                     # total arclength = L1 + L2 = 0.1 + 0.1
+
+  lock_first_pose: [true]       # base of the robot is anchored
+  lock_last_pose: [false]
+  lock_first_strain: [false]
+  lock_last_strain: [false]
+
+  fbg_theta_offset: [0]
+  fbg_core_distance: [0]
+
+  common_end_effector: false
+
+  # Base frame. Identity places the robot in the world x-forward convention the
+  # estimator expects. The adapter and driver convert Cosserat z-forward poses
+  # into this frame before injection / comparison.
+  Ti0:
+    - type: identity
+
+  robot_coupling: []
+
+hyperparameters:
+  noise_std:
+    R_p: 0.002                  # position-measurement noise std (sensor model)
+    R_o: 0.05                   # orientation-measurement noise (unused with mask 1,1,1,0,0,0)
+    R_v: 0.01                   # translational strain noise (lower => trust Cosserat priors more)
+    R_u: 0.01                   # rotational strain noise
+    R_fbg: 1.0e-5
+
+  R_pose_scale: 2.0
+  R_strain_scale: 1.0
+  R_fbg_strain_scale: 20.0
+  R_coupling_scale: 1.0e-10
+  R_coupling_diagonal: [1, 1, 1, 1, 1, 1]
+  Qc_scale: 1.0
+  Qc_diagonal: [0.1, 0.1, 0.1, 1.0, 1.0, 1.0]
+
+options:
+  initial_guess: Custom         # driver overrides per method (Straight for Method 1,
+                                # Cosserat-derived Custom for Methods 2 and 3)
+  solver: Newton                # the driver switches every method to NewtonLineSearch
+  max_iterations: 100
+  convergence_threshold: 1.0e-3
+  kirchhoff_rods: true
+
+# Driver-filled at runtime.
+control_inputs: []
+measurements: []
+
+visualization:
+  window_width: 1280
+  window_height: 720
+  render_frames: true
+  render_covariance: true
+  covariance_n_std: 3
+  verbose: false

@@ -1,5 +1,5 @@
 // test_cosserat_adapter.cpp
-// Validation tests for the Cosserat -> estimator integration (Phase 5).
+// Validation tests for the Cosserat -> estimator integration.
 //
 // Requires USE_LOCAL_TDCR=ON (links tdcr_modeling for tests C / D).
 //
@@ -20,6 +20,7 @@
 #include "cosseratrodmodel.h"
 
 #include <Eigen/Core>
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <iomanip>
@@ -229,6 +230,24 @@ double meanAbsStrainDiff(
     return sum / static_cast<double>(K);
 }
 
+// Max distance [mm] between estimated node positions and the Cosserat shape
+// (ep.initial_guess holds the Cosserat poses at the estimator nodes). Strain
+// checks alone cannot catch a wrong shape once control inputs are used,
+// because the state strain is then only the bias.
+double maxPositionErrorMm(
+    const ContinuumRobotStateEstimator::SystemState& state,
+    const EstimatorPriors&                           ep,
+    unsigned int                                     robot_idx)
+{
+    const auto& est = state.robots.at(robot_idx).estimation_nodes;
+    const auto& ref = ep.initial_guess.robots.at(robot_idx).estimation_nodes;
+    double max_err = 0.0;
+    for (size_t k = 0; k < std::min(est.size(), ref.size()); ++k)
+        max_err = std::max(max_err,
+            (est[k].pose.block<3,1>(0,3) - ref[k].pose.block<3,1>(0,3)).norm() * 1e3);
+    return max_err;
+}
+
 // Run Cosserat FK with the default-driver tensions and return the populated DTO (Data Transfer Object).
 bool runCosseratFk(CosseratRodModel& model,
                    Eigen::MatrixXd& diskFrames,
@@ -241,12 +260,12 @@ bool runCosseratFk(CosseratRodModel& model,
 
     if (!model.forwardKinematics(diskFrames, q, f_ext, l_ext)) return false;
     if (!model.hasAuxOutputs())                                return false;
-    priors = priorsFromCosseratModel(model, /*L1=*/0.1, /*L2=*/0.1);
+    priors = priorsFromCosseratModel(model, /*L1=*/0.1, /*L2=*/0.1, diskFrames);
     return true;
 }
 
 // ============================================================================
-// Test C — End-to-end convergence
+// Test C — End-to-end convergence, model strain as measurements (mode None)
 // Uses the YAML config so hyperparameters match the driver exactly.
 // ============================================================================
 bool testC_endToEndConvergence(const std::string& config_path)
@@ -262,7 +281,9 @@ bool testC_endToEndConvergence(const std::string& config_path)
     ContinuumRodPriors priors;
     CHECK(runCosseratFk(model, diskFrames, priors), "Cosserat FK converges");
 
-    const auto ep = cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames);
+    const auto ep = cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames,
+                                              ControlInputMode::None);
+    CHECK(ep.control_inputs.empty(), "mode None produces no control inputs");
     options.custom_guess = ep.initial_guess;
 
     const auto r = runEstimator(topology, params, options, ep.measurements, ep.control_inputs);
@@ -280,13 +301,94 @@ bool testC_endToEndConvergence(const std::string& config_path)
     }
     std::cout << "  max |diff|_inf = " << max_diff << "\n";
     CHECK(max_diff < 1.0e-2, "max strain diff < 1% (expected ~5e-3 from junction smoothing)");
+
+    const double pos_err = maxPositionErrorMm(r.state, ep, robot_idx);
+    std::cout << "  max position error = " << pos_err << " mm\n";
+    CHECK(pos_err < 2.0, "estimated shape within 2 mm of Cosserat (expected ~1.1 mm)");
+    return true;
+}
+
+// ============================================================================
+// Test E — Model strain as velocity input (mode StrainAsInput)
+// The state strain is the bias, so it must stay ~0, and the shape built from
+// (bias + input) must match Cosserat. Guards against double counting the
+// strain (input + measurements), which once produced a rod twice as long
+// while the strain-only check still passed.
+// ============================================================================
+bool testE_strainAsVelocityInput(const std::string& config_path)
+{
+    ConfigLoader    config(config_path);
+    const auto      topology    = config.getTopology();
+    const auto      params      = config.getHyperparameters();
+    auto            options     = config.getOptions();
+    const unsigned  robot_idx   = 0;
+
+    CosseratRodModel   model;
+    Eigen::MatrixXd    diskFrames;
+    ContinuumRodPriors priors;
+    CHECK(runCosseratFk(model, diskFrames, priors), "Cosserat FK converges");
+
+    const auto ep = cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames,
+                                              ControlInputMode::StrainAsInput);
+    CHECK(ep.control_inputs.size() == topology.K.at(robot_idx) - 1, "one input per segment");
+    options.custom_guess = ep.initial_guess;
+
+    const auto r = runEstimator(topology, params, options, ep.measurements, ep.control_inputs);
+    CHECK(r.converged, "estimator converges");
+
+    double max_bias = 0.0;
+    for (const auto& n : r.state.robots.at(robot_idx).estimation_nodes)
+        max_bias = std::max(max_bias, n.strain.cwiseAbs().maxCoeff());
+    std::cout << "  max |bias strain| = " << max_bias << "\n";
+    CHECK(max_bias < 1.0e-2, "bias strain stays ~0 (model strain carried by the input)");
+
+    const double pos_err = maxPositionErrorMm(r.state, ep, robot_idx);
+    std::cout << "  max position error = " << pos_err << " mm\n";
+    CHECK(pos_err < 2.0, "estimated shape within 2 mm of Cosserat");
+    return true;
+}
+
+// ============================================================================
+// Test F — Force as acceleration input (mode ForceAsInput)
+// Given the true strain at the base only, the prior propagated with the
+// load-driven strain derivative and the junction jump must follow the Cosserat
+// shape. A wrong sign on -K^-1 [f; l] or on the jump bends segment 2 the wrong
+// way and fails the position check.
+// ============================================================================
+bool testF_forceAsAccelerationInput(const std::string& config_path)
+{
+    ConfigLoader    config(config_path);
+    const auto      topology    = config.getTopology();
+    const auto      params      = config.getHyperparameters();
+    auto            options     = config.getOptions();
+    const unsigned  robot_idx   = 0;
+
+    CosseratRodModel   model;
+    Eigen::MatrixXd    diskFrames;
+    ContinuumRodPriors priors;
+    CHECK(runCosseratFk(model, diskFrames, priors), "Cosserat FK converges");
+    CHECK(priors.epsilon_jump_discrete.size() == priors.s_discrete.size(),
+          "one strain jump per tendon termination");
+
+    const auto ep = cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames,
+                                              ControlInputMode::ForceAsInput);
+    options.custom_guess = ep.initial_guess;
+
+    // Only the base strain is measured; everything else comes from the inputs.
+    const std::vector<ContinuumRobotStateEstimator::SensorMeasurement> base_only = { ep.measurements.at(0) };
+    const auto r = runEstimator(topology, params, options, base_only, ep.control_inputs);
+    CHECK(r.converged, "estimator converges");
+
+    const double pos_err = maxPositionErrorMm(r.state, ep, robot_idx);
+    std::cout << "  max position error = " << pos_err << " mm\n";
+    CHECK(pos_err < 2.0, "estimated shape within 2 mm of Cosserat");
     return true;
 }
 
 // ============================================================================
 // Test D — Prior vs no-prior comparison
 // Run 1: Straight guess, no measurements, no control inputs.
-// Run 2: Cosserat priors (measurements + control inputs + custom initial guess).
+// Run 2: Cosserat priors (strain measurements + custom initial guess, mode None).
 // Run 2 must be closer to the Cosserat prediction than Run 1.
 // ============================================================================
 bool testD_priorVsNoPrior(const std::string& config_path)
@@ -299,14 +401,15 @@ bool testD_priorVsNoPrior(const std::string& config_path)
     // Lock both the base pose AND the base strain so the no-prior run
     // (empty measurements) has a well-posed system. Both runs use the same
     // topology, so the only variable under test is whether Cosserat priors
-    // are injected as measurements + control inputs + custom initial guess.
+    // are injected as measurements + custom initial guess.
     topology.lock_first_strain.at(robot_idx) = true;
 
     CosseratRodModel   model;
     Eigen::MatrixXd    diskFrames;
     ContinuumRodPriors priors;
     CHECK(runCosseratFk(model, diskFrames, priors), "Cosserat FK converges");
-    const auto ep = cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames);
+    const auto ep = cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames,
+                                              ControlInputMode::None);
 
     // Run 1 — no prior. Straight initial guess, empty measurements + control inputs.
     ContinuumRobotStateEstimator::Options opts_none = config.getOptions();
@@ -350,6 +453,10 @@ int main(int argc, char* argv[])
             [&config_path] { return testC_endToEndConvergence(config_path); });
     runTest("D. Prior vs no-prior",
             [&config_path] { return testD_priorVsNoPrior(config_path); });
+    runTest("E. Strain as velocity input",
+            [&config_path] { return testE_strainAsVelocityInput(config_path); });
+    runTest("F. Force as acceleration input",
+            [&config_path] { return testF_forceAsAccelerationInput(config_path); });
 
     std::cout << "=== Results: " << g_pass << " passed, " << g_fail << " failed ===\n";
     return g_fail == 0 ? 0 : 1;

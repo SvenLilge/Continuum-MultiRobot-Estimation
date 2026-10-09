@@ -1,5 +1,17 @@
 build/*
+# build directories with suffixes (e.g. build-debug, build-standalone)
+build-*/
 examples/*
 .vscode/
 
 CLAUDE.md
+
+# Raw evaluation data: regenerate with `python scripts/evaluate.py run`.
+# The figures and summary.csv in doc/figures/ are committed (evaluation.md shows them).
+doc/figures/data/
+
+# Private notes, not pushed
+doc/notes/
+
+# macOS
+.DS_Store

@@ -107,4 +107,20 @@ if (USE_LOCAL_TDCR)
         PRIVATE ${VTK_LIBRARIES} Eigen3::Eigen yaml-cpp::yaml-cpp tdcr_modeling)
     set_target_properties(cosserat_estimator_driver PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
+
+    # Evaluation driver: Cosserat prior vs. baseline on S-shape + tip force.
+    # Headless (no VTK) — prints an RMSE/timing summary table.
+    add_executable(evaluation_cosserat_priors
+        src/examples/evaluation_cosserat_priors.cpp
+        ${H_FILES}
+        src/continuum_robot_state_estimator.cpp
+        src/continuum_rod_priors.cpp
+        src/bridge/cosserat_priors_adapter.cpp
+        src/config_loader.cpp
+        src/utilities.cpp
+    )
+    target_link_libraries(evaluation_cosserat_priors
+        PRIVATE Eigen3::Eigen yaml-cpp::yaml-cpp tdcr_modeling)
+    set_target_properties(evaluation_cosserat_priors PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../examples)
 endif()

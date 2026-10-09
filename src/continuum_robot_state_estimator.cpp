@@ -30,7 +30,7 @@ Numerics:
 - The solved update dx is applied on SE(3) for poses and additively for strains.
 
 Frame conventions:
-- Internal optimization follows the paper derivation in T_bi convention.
+- Internal optimization works in the T_bi convention.
 - Returned user-facing state means are converted back to T_ib convention.
 */
 
@@ -2064,7 +2064,7 @@ bool ContinuumRobotStateEstimator::computeStateEstimate(SystemState &state, std:
         double m;
         // m is proportional to expected local decrease and is reused by line-search
         // acceptance and convergence logic.
-        m = (-dx.transpose()*p)(0,0);
+        m = (-b.transpose()*dx)(0,0);
         double alpha = 1;
 
 

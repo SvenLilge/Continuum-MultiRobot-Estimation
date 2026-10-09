@@ -6,8 +6,7 @@
 # are deliberately empty — the driver fills them from the Cosserat model at
 # runtime via cosseratPriorsToEstimator().
 #
-# Requires USE_LOCAL_TDCR=ON when building. See doc/bridge_adapter_guide.md and
-# doc/cosserat_integration_results.md.
+# Requires USE_LOCAL_TDCR=ON when building. See doc/cosserat_integration.md.
 
 topology:
   N: 1                          # single robot
