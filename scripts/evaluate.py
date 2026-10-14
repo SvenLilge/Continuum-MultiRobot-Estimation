@@ -2,8 +2,9 @@
 """Run the Cosserat-prior evaluation and make all of its figures.
 
     python scripts/evaluate.py run     # run the C++ driver for every R_v and force (~1 min)
-    python scripts/evaluate.py plot    # figures + summary table from the saved data (seconds)
-    python scripts/evaluate.py all     # both
+    python scripts/evaluate.py timing  # time the Cosserat solve and the other stages before the estimator (a few seconds)
+    python scripts/evaluate.py plot    # figures + summary and timing tables from the saved data (seconds)
+    python scripts/evaluate.py all     # all three
 
 Run from anywhere; paths are relative to the repository root. Build the driver
 first (cmake -DUSE_LOCAL_TDCR=ON ...). Needs numpy, pandas and matplotlib only.
@@ -11,7 +12,10 @@ first (cmake -DUSE_LOCAL_TDCR=ON ...). Needs numpy, pandas and matplotlib only.
 Outputs (doc/figures/):
     data/trials_rv<R_v>.csv       one row per trial and method, incl. per-node errors
     data/shape_rv<R_v>_fz<F>.csv  estimated shapes of one trial (for the overlays)
+    data/timing_stages_raw.csv    one row per repetition of each pipeline stage ('timing')
     summary.csv                   mean, std, median, IQR, convergence per method/force
+    timing_stages.csv             median, IQR, p95 of each stage before the estimator
+    timing.csv                    time per estimate: estimator alone and with the model solve
     fig1_problem                  the estimation problem: model, real shape, force, sensor
     fig2_pipeline                 how ground truth, measurement and estimates are produced
     fig3_ranking                  which method is best: average error vs. ground truth
@@ -20,7 +24,7 @@ Outputs (doc/figures/):
     fig6_error_vs_force           how each method's error grows with the unknown force
     fig7_error_along_backbone     where along the rod the error occurs
     fig8_error_distribution       spread over the 50 trials (box plots)
-    fig9_runtime                  time per estimate and convergence rate
+    fig9_runtime                  estimator time per run (computeStateEstimate() only) and convergence rate
 Every figure is a 300 dpi PNG of the same size (IEEE page width x 3.4 in)
 with the same 8 pt text, so they look alike side by side.
 
@@ -31,6 +35,7 @@ Okabe-Ito palette with marker/line-style redundancy.
 """
 
 import argparse
+import platform
 import re
 import subprocess
 import sys
@@ -42,6 +47,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
+from matplotlib.transforms import Bbox
 
 REPO = Path(__file__).resolve().parents[1]
 DRIVER = REPO / "examples" / "evaluation_cosserat_priors"
@@ -49,6 +55,7 @@ BASE_CONFIG = REPO / "config" / "7_evaluation_s_shape.yaml"
 CONFIG_DIR = REPO / "build" / "eval_configs"
 OUT_DIR = REPO / "doc" / "figures"
 DATA_DIR = OUT_DIR / "data"
+TIMING_CSV = DATA_DIR / "timing_stages_raw.csv"   # one row per repetition of each pipeline stage
 
 DEFAULT_RV = ["0.01", "0.1", "0.5"]
 DEFAULT_FORCES = ["0.00", "0.05", "0.10", "0.15", "0.20", "0.25", "0.30"]
@@ -105,6 +112,20 @@ def cmd_run(args):
     print(f"Data written to {DATA_DIR.relative_to(REPO)}")
 
 
+def cmd_timing(args):
+    """Time every stage before the estimator (Cosserat solve, conversion, set-up), --timing-reps times each.
+
+    The trials' time_ms covers computeStateEstimate() only; write_timing() adds these stages to it.
+    """
+    if not DRIVER.exists():
+        sys.exit(f"Driver not found: {DRIVER}")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    TIMING_CSV.unlink(missing_ok=True)   # never let 'plot' pick up a file from an earlier run
+    print(f"  Timing the pipeline stages ({args.timing_reps} repetitions each)", flush=True)
+    run_driver(write_config(args.rv[0]), args.timing_force, args,
+               ["--n-trials", "1", "--timing-csv", str(TIMING_CSV), "--timing-reps", str(args.timing_reps)])
+
+
 # --------------------------------------------------------------------------- data
 
 def load_trials():
@@ -153,6 +174,50 @@ def build_series(df):
     return series
 
 
+def print_table(header, rows, left=0):
+    """Print a Markdown table with padded columns, so it also reads well in the terminal.
+
+    The first `left` columns are left-aligned, the rest right-aligned.
+    """
+    widths = [max(len(str(c)) for c in col) for col in zip(header, *rows)]
+    widths = [max(w, 3) for w in widths]
+
+    def line(cells):
+        return "| " + " | ".join(str(c).ljust(w) if i < left else str(c).rjust(w)
+                                 for i, (c, w) in enumerate(zip(cells, widths))) + " |"
+
+    print(line(header))
+    print("|" + "|".join("-" * (w + 1) + ":" if i >= left else ":" + "-" * (w + 1)
+                         for i, w in enumerate(widths)) + "|")
+    for r in rows:
+        print(line(r))
+
+
+def table_name(key):
+    """Plain-text method name for the printed tables (the figures use the labels of build_series)."""
+    if key.startswith("strain_meas_"):
+        return f"Strain meas. sigma={key[len('strain_meas_'):]}"
+    return {"model": "Model only", "baseline": "Baseline", "force_in": "Force input",
+            "strain_in": "Strain input"}.get(key, key)
+
+
+def stage_name(stage):
+    for prefix, text in [("adapter_", "Priors -> estimator inputs, "), ("estimator_construct_", "Estimator setup, ")]:
+        if stage.startswith(prefix):
+            return text + table_name(stage[len(prefix):]).lower().replace("strain_meas", "strain meas.")
+    return {"model_solve": "Cosserat model solve (no tip force)", "dto": "Model -> priors (DTO)",
+            "model_solve_warm": "Model solve, warm start (1 % tension change)",
+            "truth_solve": "True shape solve, with tip force"}.get(stage, stage)
+
+
+def fmt_ms(lo, hi=None):
+    """A time [ms] or range, in us when below 1 ms."""
+    scale, unit, fmt = (1.0, "ms", "{:.2f}") if (hi if hi is not None else lo) >= 1.0 else (1000.0, "us", "{:.1f}")
+    if hi is None:
+        return f"{fmt.format(lo * scale)} {unit}"
+    return f"{fmt.format(lo * scale)}-{fmt.format(hi * scale)} {unit}"
+
+
 def write_summary(series):
     rows = []
     for key, _, _, _, d in series:
@@ -167,11 +232,95 @@ def write_summary(series):
     table = summary.pivot(index="fz", columns="series", values="rmse_mean")
     order = [s[0] for s in series]
     table = table[[c for c in order if c in table.columns]]
-    print("\nMean RMSE [mm] per force (rows) and series (columns):\n")
-    print("| F (N) | " + " | ".join(table.columns) + " |")
-    print("|---:|" + "---:|" * len(table.columns))
+    names = [s[0] for s in series if s[0] in table.columns]
+    n_trials = int(summary.loc[summary["series"] != "model", "n"].max())
+    rows = []
     for fz, row in table.iterrows():
-        print(f"| {fz:.2f} | " + " | ".join(f"{v:.2f}" for v in row.values) + " |")
+        best = min(row[k] for k in names if k != "model")
+        rows.append([f"{fz:.2f}", *(f"{row[k]:.2f}" + ("*" if k != "model" and row[k] == best else " ")
+                                    for k in names)])
+    print(f"\nPosition error of the estimated shape [mm]: RMSE over the backbone nodes vs. the true shape,"
+          f"\nmean of {n_trials} trials per tip force (all runs, converged or not).\n")
+    print_table(["Tip force [N]", *(table_name(k) for k in names)], rows)
+    print("\n  * best method at that force (Model only excluded)"
+          "\n  Model only: Cosserat model without the unknown tip force, no estimator (exact at 0 N)"
+          "\n  sigma: noise of the model strain measurements; smaller = more trust in the model")
+
+
+def machine():
+    try:
+        cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        cpu = ""
+    return f"{cpu or platform.processor() or platform.machine()}, {platform.system()} {platform.release()}"
+
+
+def write_timing(series):
+    """Time per estimate including everything a method needs before the estimator runs.
+
+    total = model_solve + dto + adapter + estimator_construct (medians of the stage repetitions)
+            + computeStateEstimate() of each run (time_ms in the trials data).
+    The stages before the estimator hardly vary (IQR well below 1 ms), so they are added as a
+    constant; the quantiles of the total are then those of time_ms shifted by that constant.
+    The Baseline uses no model: its total is the estimator construction + time_ms.
+    """
+    if not TIMING_CSV.exists():
+        print(f"\nNo {TIMING_CSV.relative_to(REPO)}; run: python scripts/evaluate.py timing")
+        return
+    st = pd.read_csv(TIMING_CSV)
+    methods = ["baseline", "strain_meas", "force_in", "strain_in"]
+    needed = {"model_solve", "dto", *(f"estimator_construct_{m}" for m in methods),
+              *(f"adapter_{m}" for m in methods if m != "baseline")}
+    if not needed <= set(st["stage"]):
+        print(f"\n{TIMING_CSV.relative_to(REPO)} is incomplete (the timed Cosserat solve failed?); no timing tables.")
+        return
+    if not st["ok"].all():
+        print("WARNING: some timed stages did not converge:", st.loc[~st["ok"].astype(bool), "stage"].unique())
+    g = st.groupby("stage")["ms"]
+    stages = pd.DataFrame(dict(n=g.size(), median=g.median(), q25=g.quantile(0.25), q75=g.quantile(0.75),
+                               p95=g.quantile(0.95)))
+    med = stages["median"]
+    rows = []
+    for key, label, _, _, d in series:
+        if key == "model":
+            continue
+        method = "strain_meas" if key.startswith("strain_meas") else key
+        model_ms = 0.0 if method == "baseline" else med["model_solve"]
+        prep_ms = med[f"estimator_construct_{method}"] + (0.0 if method == "baseline" else med["dto"] + med[f"adapter_{method}"])
+        est = d["time_ms"]
+        tot = est + model_ms + prep_ms
+        rows.append(dict(series=key, n=len(d), model_ms=model_ms, prep_ms=prep_ms,
+                         estimator_median=est.median(), estimator_q25=est.quantile(0.25), estimator_q75=est.quantile(0.75),
+                         total_median=tot.median(), total_q25=tot.quantile(0.25), total_q75=tot.quantile(0.75),
+                         total_p95=tot.quantile(0.95), iterations_median=d["iterations"].median(), converged_frac=d["converged"].mean()))
+    timing = pd.DataFrame(rows)
+    timing.to_csv(OUT_DIR / "timing.csv", index=False, float_format="%.4f")
+    stages.to_csv(OUT_DIR / "timing_stages.csv", float_format="%.5f")
+
+    print("\nComputation time per estimate [ms], median (IQR) over all runs:\n")
+    print_table(["Method", "Estimator [ms]", "Model + prep [ms]", "Total [ms]", "Converged [% of runs]"],
+                [[table_name(r["series"]), f"{r['estimator_median']:.1f} ({r['estimator_q25']:.1f}-{r['estimator_q75']:.1f})",
+                  f"{r['model_ms'] + r['prep_ms']:.2f}",
+                  f"{r['total_median']:.1f} ({r['total_q25']:.1f}-{r['total_q75']:.1f})",
+                  f"{100 * r['converged_frac']:.0f}"] for r in rows],
+                left=1)
+    print("\n  Estimator: computeStateEstimate() only"
+          "\n  Model + prep: Cosserat model solve + conversion to estimator inputs + estimator setup"
+          "\n                (medians of the stages below; the Baseline needs only the setup)"
+          "\n  Total: Estimator + Model + prep")
+
+    n_reps = int(stages["n"].max())
+    print(f"\nStages before the estimator, median (IQR) over {n_reps} repetitions; machine: {machine()}\n")
+    order = ["model_solve", "dto", *sorted(i for i in stages.index if i.startswith("adapter_")),
+             *sorted(i for i in stages.index if i.startswith("estimator_construct_"))]
+    info = ["model_solve_warm", "truth_solve"]
+    order += [i for i in stages.index if i not in order + info]
+    print_table(["Stage", "Median", "IQR"],
+                [[stage_name(i), fmt_ms(stages.at[i, "median"]),
+                  fmt_ms(stages.at[i, "q25"], stages.at[i, "q75"])] for i in order if i in stages.index]
+                + [[stage_name(i) + " (not in totals)", fmt_ms(stages.at[i, "median"]),
+                    fmt_ms(stages.at[i, "q25"], stages.at[i, "q75"])] for i in info if i in stages.index],
+                left=1)
 
 
 # --------------------------------------------------------------------------- style
@@ -586,12 +735,12 @@ def fig_shapes(series, forces, shape_rv):
         ax.plot(0, 0, marker="s", color=INK, markersize=5, linestyle="none", label="Fixed base")
         panel(ax, i, rf"Unknown tip force $F$ = {float(fz):.2f} N (one trial)")
         ax.set_xlabel(f"{a} [mm]")
-    # Same limits in every panel; equal aspect then widens them to fill the panel.
-    xs = [ax.get_xlim() for ax in axes]
-    ys = [ax.get_ylim() for ax in axes]
+    # Same limits in every panel; equal aspect then widens them to fill the panel. The panels share
+    # their data limits (not fixed axis limits, which matplotlib would override with a warning).
+    shared = Bbox.union([ax.dataLim for ax in axes])
     for i, ax in enumerate(axes):
-        ax.set_xlim(min(x[0] for x in xs), max(x[1] for x in xs))
-        ax.set_ylim(min(y[0] for y in ys), max(y[1] for y in ys))
+        ax.update_datalim(shared.get_points())
+        ax.autoscale_view()
         ax.set_aspect("equal", adjustable="datalim")
         if i > 0:
             ax.tick_params(labelleft=False)
@@ -606,7 +755,8 @@ def fig_shapes(series, forces, shape_rv):
 def fig_runtime(series):
     methods = [s for s in series if s[0] != "model"][::-1]     # top-to-bottom = legend order
     fig, ax = plt.subplots(figsize=FIG_SIZE, layout="constrained")
-    headline(fig, "Computation time per estimate", "Each dot is one run; lower is faster")
+    headline(fig, "Estimator time per run (computeStateEstimate() only)",
+             "Each dot is one run; lower is faster; the Cosserat model solve is not included")
     data = [d["time_ms"].values for *_, d in methods]
     pos = np.arange(1, len(methods) + 1)
     bp = ax.boxplot(data, positions=pos, vert=False, widths=0.55, whis=(5, 95), showfliers=False,
@@ -625,7 +775,7 @@ def fig_runtime(series):
         ax.annotate(f"{100 * d['converged'].mean():.0f}% converged", (xmax * 1.4, p), va="center",
                     fontsize=FS, color=INK_2)
     ax.set_yticks(pos, [s[2].replace("\n", " ") for s in methods])
-    ax.set_xlabel("Computation time per estimate [ms], log scale")
+    ax.set_xlabel("Estimator time, computeStateEstimate() only [ms], log scale")
     ax.grid(axis="y", visible=False)
     save(fig, "fig9_runtime")
 
@@ -646,13 +796,14 @@ def cmd_plot(args):
     fig_distribution(series, [float(f) for f in args.box_forces])
     fig_runtime(series)
     write_summary(series)
+    write_timing(series)
 
 
 # --------------------------------------------------------------------------- CLI
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["run", "plot", "all"])
+    p.add_argument("command", choices=["run", "timing", "plot", "all"])
     p.add_argument("--rv", nargs="+", default=DEFAULT_RV, help="R_v = R_u levels for Strain as measurement")
     p.add_argument("--forces", nargs="+", default=DEFAULT_FORCES, help="tip forces F_z [N]")
     p.add_argument("--trials", type=int, default=50, help="noise draws per force")
@@ -662,11 +813,15 @@ def main():
     p.add_argument("--shape-rv", default="0.5", help="R_v of Strain as measurement shown in the shape overlays")
     p.add_argument("--junction", type=float, default=0.10, help="segment junction arc length [m]; marked in figs 5 and 7")
     p.add_argument("--paper", action="store_true", help="no figure titles (the paper caption carries them)")
+    p.add_argument("--timing-reps", type=int, default=300, help="repetitions per pipeline stage for 'timing'")
+    p.add_argument("--timing-force", default="0.10", help="tip force [N] of the timed ground-truth solve")
     args = p.parse_args()
     global SHOW_HEADLINES
     SHOW_HEADLINES = not args.paper
     if args.command in ("run", "all"):
         cmd_run(args)
+    if args.command in ("timing", "all"):
+        cmd_timing(args)
     if args.command in ("plot", "all"):
         cmd_plot(args)
 

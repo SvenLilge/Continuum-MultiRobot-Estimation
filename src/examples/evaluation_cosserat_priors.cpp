@@ -16,6 +16,8 @@
 //        Strain as input       : noisy tip + velocity inputs = model strain
 //                                (ControlInputMode::StrainAsInput)
 //   6. Report per-method RMSE / MaxErr / Time stats (mean ± std over N trials).
+//      Time = computeStateEstimate() only; --timing-csv times the stages before it
+//      (Cosserat solve, conversion, estimator set-up), see timePipelineStages().
 //   7. Optionally write per-run results and the last trial's shapes to CSV.
 //
 // Requires USE_LOCAL_TDCR=ON. See doc/evaluation.md for the experiment
@@ -32,6 +34,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -209,6 +212,8 @@ struct Args
     std::string  config_path;
     std::string  csv_path = "";              // if non-empty, write the last trial's shapes here
     std::string  trials_csv_path = "";       // if non-empty, append one row per trial and method
+    std::string  timing_csv_path = "";       // if non-empty, time every pipeline stage (see timePipelineStages)
+    unsigned int timing_reps = 300;          // repetitions per stage for --timing-csv
     unsigned int n_trials = 1;               // multi-seed averaging
     double       sigma   = 0.001;            // tip-position noise std [m]
     double       fx      = 0.0;              // tip force [N], base frame
@@ -229,6 +234,7 @@ bool parseArgs(int argc, char* argv[], Args& a)
         std::cerr << "Usage: " << argv[0]
                   << " <config.yaml>"
                   << " [--n-trials N] [--csv path] [--trials-csv path]"
+                  << " [--timing-csv path] [--timing-reps N]"
                   << " [--sigma S] [--fx X] [--fy Y] [--fz Z] [--seed N]"
                   << " [--q F1,F2,F3,F4,F5,F6]\n";
         return false;
@@ -256,6 +262,18 @@ bool parseArgs(int argc, char* argv[], Args& a)
         else if (s == "--fz")       nextDbl("--fz",     a.fz);
         else if (s == "--csv")          nextStr("--csv",         a.csv_path);
         else if (s == "--trials-csv")   nextStr("--trials-csv",  a.trials_csv_path);
+        else if (s == "--timing-csv")   nextStr("--timing-csv",  a.timing_csv_path);
+        else if (s == "--timing-reps") {
+            if (i + 1 >= argc) { std::cerr << "--timing-reps requires a value\n"; return false; }
+            char* end = nullptr;
+            errno = 0;
+            const long reps = std::strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || errno == ERANGE || reps < 1
+                || static_cast<unsigned long>(reps) > std::numeric_limits<unsigned int>::max()) {
+                std::cerr << "--timing-reps must be an integer >= 1\n"; return false;
+            }
+            a.timing_reps = static_cast<unsigned int>(reps);
+        }
         else if (s == "--n-trials") {
             if (i + 1 >= argc) { std::cerr << "--n-trials requires a value\n"; return false; }
             a.n_trials = static_cast<unsigned int>(std::atoi(argv[++i]));
@@ -474,6 +492,100 @@ void appendTrialsCsv(const std::string& path, const Args& args, double L,
         }
 }
 
+// Wall-clock time of every stage that runs BEFORE computeStateEstimate(), each
+// repeated `reps` times; one row per repetition (stage,rep,ms,ok). The per-trial
+// time_ms covers computeStateEstimate() only, so a model-based method's time per
+// estimate is model_solve + dto + its adapter + estimator_construct + time_ms.
+//   model_solve       Cosserat solve without the tip force, as the experiment does it:
+//                     new object, default (straight) initial guess. Includes the tendon
+//                     loads (computeInternalLoads). Used by every method except the Baseline.
+//   model_solve_warm  information only: one object, initial guess = previous solution,
+//                     tensions alternating between 1.00 and 1.01 x nominal (a 1 % change
+//                     per frame, as for a robot that moves smoothly).
+//   truth_solve       Cosserat solve WITH the tip force (simulated reality), warm-started
+//                     from the model solution as in main(). It is not part of any method;
+//                     reported only so it is not mistaken for one.
+//   dto                 priorsFromCosseratModel (strains + loads -> ContinuumRodPriors).
+//   adapter_<method>    cosseratPriorsToEstimator for that method.
+//   estimator_construct_<method>  the ContinuumRobotStateEstimator constructor.
+void timePipelineStages(const std::string& path, unsigned int reps,
+                        const Eigen::Matrix<double, 6, 1>& q,
+                        const Eigen::Vector3d& tip_force, const Eigen::Vector3d& tip_moment,
+                        double L1, double L2,
+                        const Estimator::RobotTopology& topology,
+                        const Estimator::Hyperparameters& params,
+                        const std::array<MethodSetup, N_METHODS>& setup,
+                        unsigned int robot_idx)
+{
+    std::ofstream f(path);
+    if (!f) {
+        std::cerr << "Failed to open timing-csv path: " << path << "\n";
+        return;
+    }
+    f << "stage,rep,ms,ok\n" << std::setprecision(9);
+    auto row = [&](const std::string& stage, unsigned int r, double ms, bool ok) {
+        f << stage << "," << r << "," << ms << "," << (ok ? 1 : 0) << "\n";
+    };
+    const Eigen::Vector3d zero = Eigen::Vector3d::Zero();
+
+    CosseratRodModel model;                 // converged model solve, for dto/adapter
+    Eigen::MatrixXd  diskFrames;
+    if (!model.forwardKinematics(diskFrames, q, zero, zero) || !model.hasAuxOutputs()) {
+        std::cerr << "Timing: Cosserat prior solve FAILED\n";
+        return;
+    }
+
+    for (unsigned int r = 0; r < reps; ++r) {
+        const auto t0 = Clock::now();
+        CosseratRodModel m;
+        Eigen::MatrixXd df;
+        const bool ok = m.forwardKinematics(df, q, zero, zero) && m.hasAuxOutputs();
+        row("model_solve", r, msSince(t0), ok);
+    }
+    {
+        CosseratRodModel m;
+        Eigen::MatrixXd df;
+        m.forwardKinematics(df, q, zero, zero);
+        for (unsigned int r = 0; r < reps; ++r) {
+            const Eigen::Matrix<double, 6, 1> q_next = q * ((r % 2) ? 1.00 : 1.01);
+            m.setDefaultInitValues(m.getFinalInitValues());
+            const auto t0 = Clock::now();
+            const bool ok = m.forwardKinematics(df, q_next, zero, zero) && m.hasAuxOutputs();
+            row("model_solve_warm", r, msSince(t0), ok);
+        }
+    }
+    for (unsigned int r = 0; r < reps; ++r) {
+        CosseratRodModel m;
+        m.setDefaultInitValues(model.getFinalInitValues());   // as in main()
+        Eigen::MatrixXd df;
+        const auto t0 = Clock::now();
+        const bool ok = m.forwardKinematics(df, q, tip_force, tip_moment);
+        row("truth_solve", r, msSince(t0), ok);
+    }
+
+    const ControlInputMode mode[N_METHODS] = { ControlInputMode::None, ControlInputMode::None,
+                                               ControlInputMode::ForceAsInput,
+                                               ControlInputMode::StrainAsInput };
+    for (unsigned int r = 0; r < reps; ++r) {
+        auto t0 = Clock::now();
+        const ContinuumRodPriors priors = priorsFromCosseratModel(model, L1, L2, diskFrames);
+        row("dto", r, msSince(t0), true);
+        for (int m = StrainMeas; m < N_METHODS; ++m) {
+            t0 = Clock::now();
+            const EstimatorPriors ep = cosseratPriorsToEstimator(priors, topology, robot_idx,
+                                                                 diskFrames, mode[m]);
+            row(std::string("adapter_") + kKey[m], r, msSince(t0),
+                !ep.measurements.empty() || !ep.control_inputs.empty());
+        }
+        for (int m = 0; m < N_METHODS; ++m) {
+            t0 = Clock::now();
+            Estimator estimator(topology, params, setup[m].options);
+            row(std::string("estimator_construct_") + kKey[m], r, msSince(t0), true);
+        }
+    }
+    std::cout << "Wrote timing CSV: " << path << " (" << reps << " repetitions per stage)\n";
+}
+
 } // anonymous namespace
 
 
@@ -532,10 +644,10 @@ int main(int argc, char* argv[])
 
     CosseratRodModel rod_truth;
     // Warm-start the real solve from the model's converged shooting state.
-    // The default initial guess (straight rod) diverges for tip forces above
-    // ~0.02 N when the rod is already heavily bent by tendon tensions; using
-    // the model's converged (u0, v0) as the starting point lets the shooting
-    // method converge cleanly for much larger disturbances.
+    // With the original Cosserat solver (before 2026-10-14) the default initial
+    // guess (straight rod) was unreliable for tip forces above ~0.02 N when the
+    // rod is already heavily bent by tendon tensions; starting from the model's
+    // converged (u0, v0) is also faster.
     rod_truth.setDefaultInitValues(rod_model.getFinalInitValues());
     Eigen::MatrixXd diskFrames_truth;
     if (!rod_truth.forwardKinematics(diskFrames_truth, q, tip_force, tip_moment)
@@ -581,6 +693,10 @@ int main(int argc, char* argv[])
         if (m == StrainMeas) setup[m].model_measurements = from_model[m].measurements;
         else                 setup[m].control_inputs     = from_model[m].control_inputs;
     }
+
+    if (!args.timing_csv_path.empty())
+        timePipelineStages(args.timing_csv_path, args.timing_reps, q, tip_force, tip_moment,
+                           L1, L2, topology, params, setup, robot_idx);
 
     // --- 4. Trials: same noisy tip measurement for every method -------------
     std::vector<TrialResult> trials;

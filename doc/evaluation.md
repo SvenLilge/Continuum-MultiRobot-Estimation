@@ -1,8 +1,8 @@
 # Evaluation: Four Ways to Use a Physics Model in Shape Estimation
 
-**Reproduce:** `python scripts/evaluate.py all` (Section 8)
+**Reproduce:** `python scripts/evaluate.py all` (Section 7)
 
-A continuum robot is pushed by a force nobody measures. We know its tendon tensions (so a physics model can predict its shape) and we have one noisy sensor at its tip. We compare four ways of combining the two. The two methods that hand the model to the estimator as a **control input** are clearly best: **Force as input** (how the bending changes along the rod) recovers the real shape to **2.7 mm** on average, **Strain as input** (the bending itself) to **2.8 mm**. That is 2.4–7× better than the alternatives, and neither needs tuning. Strain as input is the most accurate when the force is small; Force as input is the most accurate under larger forces and converges far more reliably.
+A continuum robot is pushed by a force nobody measures. We know its tendon tensions (so a physics model can predict its shape) and we have one noisy sensor at its tip. We compare four ways of combining the two. The two methods that hand the model to the estimator as a **control input** are clearly best: **Force as input** (how the bending changes along the rod) recovers the real shape to **2.7 mm** on average, **Strain as input** (the bending itself) to **2.9 mm**. That is 2.4–7× better than the alternatives, and neither needs tuning. Strain as input is the most accurate when the force is small; Force as input is the most accurate under larger forces and converges far more reliably.
 
 ![Average error per method](figures/fig3_ranking.png)
 
@@ -11,9 +11,10 @@ A continuum robot is pushed by a force nobody measures. We know its tendon tensi
 **At a glance**
 
 - **Force as input** has a typical (median) error of 1.2–2.3 mm at every force. In 44 of 350 runs it bows out of the plane (5–14 mm off); these are frequent with no force (17 of 50) and absent at the largest force.
-- **Strain as input** is the most accurate with no or little force (1.5 mm at 0 N), but its error grows with the force (4.1 mm at 0.30 N). It converges slowly: under a force most runs hit the 100-iteration limit.
+- **Strain as input** is the most accurate with no or little force (1.5 mm at 0 N), but its error grows with the force (4.1 mm at 0.30 N). It converges slowly: from 0.10 N on, most of its runs hit the 100-iteration limit.
 - **Strain as measurement depends entirely on how much it trusts the model.** Trusting it a lot is worse than not estimating at all once the robot is pushed. Trusting it little gives 4–12 mm. No single setting is best.
 - **The Baseline**, the tip sensor alone, gets a smooth curve through the tip but misses where the S flips: 16 mm with no force, improving to 8 mm as the force flattens the S.
+- **Time per estimate includes the Cosserat model solve (5.2 ms)**, which every method except the Baseline needs. Counting it, Force as input takes 10.5 ms per estimate (median; 5.3 ms in the estimator alone), about as long as the Baseline (12.0 ms; Section 4.7).
 
 Background terms (strain, prior, control input) are explained in [`cosserat_integration.md`](cosserat_integration.md), Sections 1–3. The rod physics is in [`tdcr-modeling/doc/cosserat_rod_model.md`](../../tdcr-modeling/doc/cosserat_rod_model.md).
 
@@ -109,7 +110,7 @@ Config: [`config/7_evaluation_s_shape.yaml`](../config/7_evaluation_s_shape.yaml
 |---|---|---|
 | **Shape error** | $\sqrt{\tfrac{1}{11}\sum_k \lVert p^{est}_k - p^{true}_k \rVert^2}$: root-mean-square distance between estimated and true node positions | "On average, each point of the estimated rod is this far from the real one." Lower is better; 0 = perfect. The rod is 200 mm long. |
 | **Error along the rod** | $\lVert p^{est}_k - p^{true}_k \rVert$ at each node $k$ | Where the estimate goes wrong |
-| **Computation time** | Wall-clock time of one `computeStateEstimate()` call | Cost per estimate |
+| **Computation time** | Wall-clock time per estimate: the Cosserat solve without the force, its conversion into measurements or inputs, the estimator set-up, and one `computeStateEstimate()` call (Section 4.7) | Cost per estimate |
 | **Convergence** | Share of runs that met the threshold within 100 iterations | Whether the solver finished; unfinished runs still return their last estimate, which is what is scored |
 
 ## 4. Results
@@ -118,7 +119,7 @@ Config: [`config/7_evaluation_s_shape.yaml`](../config/7_evaluation_s_shape.yaml
 
 ### 4.1 Which method is best
 
-See Figure 3 at the top of this document. Averaged over all 350 runs, **Force as input is 2.7 mm off the real shape and Strain as input 2.8 mm**; half of their runs are within 1.7 and 2.7 mm. The next best, Strain as measurement with low trust in the model, is 6.9 mm off. The Baseline (11.6 mm) beats the model used alone (14.6 mm). Strain as measurement with medium or high trust lands past the dashed line: worse than using the model alone, without any estimator.
+See Figure 3 at the top of this document. Averaged over all 350 runs, **Force as input is 2.7 mm off the real shape and Strain as input 2.9 mm**; half of their runs are within 1.7 and 2.7 mm. The next best, Strain as measurement with low trust in the model, is 6.9 mm off. The Baseline (11.6 mm) beats the model used alone (14.6 mm). Strain as measurement with medium or high trust lands past the dashed line: worse than using the model alone, without any estimator.
 
 ### 4.2 What the estimates look like
 
@@ -144,13 +145,13 @@ This figure explains the ranking:
 
 | $F$ (N) | Model only | Baseline | Strain meas., high trust | Strain meas., medium trust | Strain meas., low trust | **Strain as input** | **Force as input** |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 0.00 |  0.00 | 15.66 |  5.98 | 4.18 | 12.37 | **1.54** (0.70) | 4.69 (2.22) |
-| 0.05 |  7.62 | 14.40 | 12.64 | 10.33 |  9.31 | **2.72** (1.19) | 3.31 (1.39) |
-| 0.10 | 12.81 | 13.17 | 17.26 | 14.71 |  7.32 | **2.49** (1.87) | 2.62 (1.17) |
-| 0.15 | 16.58 | 11.60 | 20.64 | 17.93 |  5.97 | 2.53 (2.45) | **2.12** (1.30) |
-| 0.20 | 19.48 |  9.92 | 23.23 | 20.41 |  5.06 | 2.92 (2.90) | **1.88** (1.57) |
-| 0.25 | 21.79 |  8.91 | 25.30 | 22.39 |  4.47 | 3.57 (3.47) | **1.95** (1.93) |
-| 0.30 | 23.68 |  7.79 | 26.99 | 24.01 |  4.13 | 4.09 (3.91) | **2.23** (2.27) |
+| 0.00 | 0.00 | 15.66 | 5.98 | 4.18 | 12.37 | **1.54** (0.70) | 4.69 (2.22) |
+| 0.05 | 7.62 | 14.41 | 12.64 | 10.33 | 9.31 | **2.72** (1.19) | 3.31 (1.39) |
+| 0.10 | 12.81 | 13.17 | 17.26 | 14.71 | 7.32 | **2.49** (1.87) | 2.62 (1.17) |
+| 0.15 | 16.58 | 11.60 | 20.63 | 17.93 | 5.97 | 2.54 (2.46) | **2.12** (1.30) |
+| 0.20 | 19.48 | 9.92 | 23.23 | 20.41 | 5.06 | 2.92 (2.90) | **1.88** (1.57) |
+| 0.25 | 21.79 | 8.91 | 25.30 | 22.39 | 4.47 | 3.62 (3.45) | **1.95** (1.93) |
+| 0.30 | 23.68 | 7.80 | 26.99 | 24.01 | 4.13 | 4.12 (3.91) | **2.23** (2.27) |
 
 *Mean shape error in mm over 50 trials; for the input methods the median follows in brackets. Bold = best mean per row. The means of both input methods are pulled up at small forces by out-of-plane runs (Section 4.6). The other methods have mean ≈ median.*
 
@@ -180,28 +181,56 @@ Strain as input is best up to 0.10 N; from 0.15 N on, Force as input is best and
 - **Strain as measurement** is very consistent, but consistently wrong when trusted too much.
 - **The Baseline** is consistent with no force and spreads out as the force grows (6–12 mm at 0.30 N).
 - **Force as input** has two groups of runs. Most land at 1–3 mm. A second group, 5–14 mm off, are runs that bend **out of the plane** of the S: the estimated rod bows sideways (up to 17 mm) and still passes through the measured tip. The second group shrinks as the force grows: 17 of 50 runs at 0 N, 5 at 0.15 N, none at 0.30 N. It is caused by the noise draw: the same draws fail at several forces.
-- **Strain as input** spreads widely with no force (0.02–6 mm): most runs barely move from the model's shape, which is then the truth, and a few bow out of the plane like Force as input (the same noise draws). Under a force it forms a tight cluster (2–3 mm at 0.15 N, 3–7 mm at 0.30 N).
+- **Strain as input** spreads widely with no force (0.01–6 mm): most runs barely move from the model's shape, which is then the truth, and a few bow out of the plane like Force as input (the same noise draws). Under a force it forms a tight cluster (2–3 mm at 0.15 N, 3–7 mm at 0.30 N).
 
 ### 4.7 Speed and convergence
 
-| Method | Time per estimate (median) | Iterations (median) | Converged |
-|---|---:|---:|---:|
-| Baseline | ~12 ms | 54 | 309 / 350 (88 %) |
-| Strain as measurement | ~1 ms | 3–4 | 350 / 350 (100 %) for every trust setting |
-| Strain as input | ~27 ms | 100 (the limit) | 144 / 350 (41 %): 37 of 50 at 0 N, 7 of 50 at 0.30 N |
-| Force as input | ~5 ms | 23 | 334 / 350 (95 %) |
+**Where the time goes.** Every method except the Baseline needs the Cosserat model before the estimator can start: the model supplies the strains (Strain as measurement, Strain as input) and the tendon loads (Force as input). All three use **the same solve**, without the unknown force; the tendon loads are computed inside it. The methods differ only in how the result is converted, which takes microseconds.
+
+| Stage | Needed by | Time [ms], median (IQR) |
+|---|---|---:|
+| Cosserat solve without the force (shooting method + tendon loads) | Strain as measurement, Strain as input, Force as input | **5.2** (5.1–5.3) |
+| Conversion: `priorsFromCosseratModel` + `cosseratPriorsToEstimator` | the same three | ≤ 0.003 |
+| Estimator set-up (constructor) | all four | 0.02 |
+| Estimator: one `computeStateEstimate()` call | all four | per method, below |
+| *Cosserat solve **with** the force (ground truth)* | *none: it simulates the real robot* | *1.6 (1.5–1.6)* |
+
+*Stages before the estimator: 300 repetitions each. Estimator: all 350 runs per method.*
+
+| Method | Estimator alone | + model solve, conversion and set-up | **Time per estimate** | Iterations (median) | Converged |
+|---|---:|---:|---:|---:|---:|
+| Baseline | 12.0 (5.9–18.0) | – | **12.0** (5.9–18.0) | 54 | 308 / 350 (88 %) |
+| Strain as measurement | 1.0 (0.9–1.1) | 5.2 | **6.2–6.3** for every trust setting | 3–4 | 350 / 350 (100 %) for every trust setting |
+| Strain as input | 26.8 (12.7–28.5) | 5.2 | **32.1** (17.9–33.8) | 100 (the limit) | 143 / 350 (41 %): 37 of 50 at 0 N, 5 of 50 at 0.30 N |
+| Force as input | 5.3 (2.4–11.4) | 5.2 | **10.5** (7.6–16.6) | 23 | 334 / 350 (95 %) |
+
+*Milliseconds, median (interquartile range) over 350 runs. The stages before the estimator hardly vary, so they are added as a constant (their medians).*
+
+**The Cosserat solver was made faster on 2026-10-14** (`tdcr-modeling`, see its `doc/cosserat_rod_model.md` Section 6). In this driver's timing the model solve took 21.7 ms with the original solver (commit `cf67a0c`), so Force as input took 27.1 ms per estimate. The equations are unchanged; three numerical changes: the 6×6 system of R&W eq. (16) is solved by LU instead of an SVD (the matrix is symmetric positive definite for non-negative tensions, so the solution is the same), the shooting method gets a correct finite-difference Jacobian (GSL's default step is far too small for the unknowns that are close to zero), and it stops once $\lvert r\rvert^2 \le 10^{-16}$. In a separate back-to-back benchmark (S-shape, 300 solves each, medians): cold model solve 21.2 → 5.1 ms, ground-truth solve 10.7 → 1.6 ms, warm start 14.8 → 1.3 ms.
+- **Same rod.** On the evaluation's S-shape (model and ground truth at every force level) the original solver converged too: its tips are within 0.11 µm of a fully converged reference solve, the new solver's within 0.006 µm.
+- **Same results.** All results in this document were regenerated with the new solver. 2,066 of the 2,100 estimator runs changed their RMSE by less than 0.07 mm. The 34 larger changes (up to 1.6 mm; 26 Strain as input, 7 Baseline, 1 Force as input) are all runs that stopped at the 100-iteration limit in at least one of the two versions; such runs are sensitive to µm-level changes in their input (issue 8). The means per method changed by at most 0.011 mm. The convergence counts changed by at most one run per method (per force level by up to two: Strain as input at 0.30 N, 7 → 5). Building against `tdcr-modeling` commit `cf67a0c` reproduces the earlier errors, iteration counts and convergence exactly (times are re-measured on every run). The timing of the original-solver run is kept in [`figures/timing_original_solver.csv`](figures/timing_original_solver.csv).
+- **Where the original solver was not accurate.** Both solvers accept any solve with $\lvert r\rvert^2 \le 10^{-6}$, but the original often stopped well above $10^{-16}$: in a test of 137 configurations, 36 of 43 accepted zero-force solves were 14 µm to 4.5 mm off the converged rod, and 16 solves failed. The new solver converged in all 137, within 0.05 µm. None of these cases occurs in this evaluation: the model solve converged (see "Same rod"), and the ground-truth solves start from its solution. Started from a straight rod instead, the original solver accepts some of them with $\lvert r\rvert^2$ up to $3\times10^{-7}$ (for example the S-shape with 0.10 N, about 2.4 mm off).
+
+**Findings.**
+- **The model solve is about half the time of Force as input** (5.2 of 10.5 ms) and most of Strain as measurement's. The "~5 ms" of Force as input is the estimator alone; the realistic time per estimate is **~11 ms**.
+- **Counting the model, Force as input is about as fast as the Baseline** (median 10.5 vs 12.0 ms, mean 12.9 vs 12.7 ms; faster in 49 % of paired runs), which uses no model but starts from a straight rod, and it is about 4× more accurate (2.7 vs 11.6 mm). Strain as measurement is the fastest (6.2 ms).
+- **When the model cost is paid.** The solve depends only on the tendon tensions. In this experiment they are fixed, so the driver solves the model once per force level and reuses it for all 50 runs; the per-run times in `trials_rv*.csv` (and Figure 9) are the estimator alone. On a robot whose tensions change every frame, the model must be solved again for every estimate, and the total above is the time per estimate. The solve needs only the commanded tensions, so it can run before the sensor reading arrives (or in parallel with the previous estimate).
+- **Strain as input is held down by the iteration limit.** Most of its runs stop at 100 iterations. Run to convergence (Section 6, issue 2), its estimator takes on average 18–100 ms depending on the force (single runs up to about 240 ms), so about 23–105 ms per estimate.
+- **Starting the model from its previous solution helps.** With the tensions changing by 1 % between frames, the warm-started solve takes 1.3 ms (IQR 1.3–1.6) instead of 5.2. The tables use the cold start the experiment uses, so they are an upper bound for a robot that moves smoothly.
+
+**How the time was measured.** Wall-clock time (`std::chrono::steady_clock`) of the C++ code, Release build (Apple clang 21, `-O3`), single thread, on an Apple M4 Pro (macOS 26). Absolute times belong to this computer; the ratios between methods carry over. To reproduce: `python scripts/evaluate.py timing`, then `plot` (Section 7).
 
 ![Time per estimate](figures/fig9_runtime.png)
 
-*Figure 9. Computation time for all 350 runs per method (log scale). Strain as measurement is fastest because it starts from the model's shape and the model's values hold it there. Force as input also starts from the model's shape but must find the bending level from the tip. Strain as input converges slowly under a force, so most of its runs stop at the 100-iteration limit (~27 ms). The Baseline starts from a straight rod.*
+*Figure 9. Estimator time (`computeStateEstimate()` only) for all 350 runs per method (log scale); the model solve (~5.2 ms) is not included, see the tables above. Strain as measurement is fastest because it starts from the model's shape and the model's values hold it there. Force as input also starts from the model's shape but must find the bending level from the tip. Strain as input converges slowly under a force, so most of its runs stop at the 100-iteration limit (~27 ms). The Baseline starts from a straight rod.*
 
-Data: all statistics in [`figures/summary.csv`](figures/summary.csv). The per-trial results with per-node errors are written to `figures/data/` by `evaluate.py run` (not committed; see Section 8).
+Data: all statistics in [`figures/summary.csv`](figures/summary.csv); times in [`figures/timing.csv`](figures/timing.csv) (per method) and [`figures/timing_stages.csv`](figures/timing_stages.csv) (per stage). The per-trial results with per-node errors are written to `figures/data/` by `evaluate.py run` (not committed; see Section 7).
 
 ## 5. Conclusions
 
-**Handing the model over as a control input beats handing it over as a measurement.** Both input methods (2.7 and 2.8 mm on average) are 2.4× better than the best-tuned Strain as measurement, and need no trust setting. An input tells the estimator's prior what to expect without asserting the shape, so the tip measurement can still move the estimate to where the robot really is.
+**Handing the model over as a control input beats handing it over as a measurement.** Both input methods (2.7 and 2.9 mm on average) are 2.4× better than the best-tuned Strain as measurement, and need no trust setting. An input tells the estimator's prior what to expect without asserting the shape, so the tip measurement can still move the estimate to where the robot really is.
 
-**Force as input is the best choice under an unknown force: 1.9–2.2 mm from 0.15 N on, and 95 % of runs converge in ~5 ms.** The unknown force mainly changes *how much* the rod bends. It hardly changes *how the bending changes* along the rod, because that is set by the tendons (Figure 5). Force as input asserts exactly the part that stays valid and leaves the rest to the sensor. Its weakness is that one tip position does not pin the shape down: in 44 of 350 runs the solver finds a shape that reaches the same tip by bowing out of the plane, mostly at small forces (Section 6, issue 1). Without these runs it averages 1.7 mm.
+**Force as input is the best choice under an unknown force: 1.9–2.2 mm from 0.15 N on, and 95 % of runs converge, in ~11 ms per estimate including the model solve (~5 ms in the estimator).** The unknown force mainly changes *how much* the rod bends. It hardly changes *how the bending changes* along the rod, because that is set by the tendons (Figure 5). Force as input asserts exactly the part that stays valid and leaves the rest to the sensor. Its weakness is that one tip position does not pin the shape down: in 44 of 350 runs the solver finds a shape that reaches the same tip by bowing out of the plane, mostly at small forces (Section 6, issue 1). Without these runs it averages 1.7 mm.
 
 **Strain as input is the best choice when the model is nearly right: 1.5–2.7 mm up to 0.10 N.** It places the flip exactly at the junction, where Force as input smears it. But it carries the model's bending *level* too, and only shifts it as a whole; so the more the force changes the bending in one segment, the more it is off (4.1 mm at 0.30 N). It also converges slowly (Section 6, issue 2).
 
@@ -214,13 +243,13 @@ With a real strain sensor (for example fibre Bragg gratings), σ would be that s
 
 **The Baseline improves as the force grows** (15.7 → 7.8 mm), the opposite of the model. The force flattens the S, so the real shape comes closer to the smooth curve the Baseline prefers (Section 6, issue 6). It beats Strain as measurement with medium or high trust from 0.10 N on, but never the input methods or Strain as measurement with low trust.
 
-**Speed.** Strain as measurement is fastest (~1 ms) and always converges. Force as input takes ~5 ms and converges in 95 % of runs; the Baseline ~12 ms and 88 %; Strain as input ~27 ms and 41 %.
+**Speed.** Per estimate (medians), including the Cosserat solve (5.2 ms) where a method needs it: Strain as measurement 6.2 ms (100 % converge), Force as input 10.5 ms (95 %), the Baseline 12.0 ms (88 %), Strain as input 32 ms (41 %, limited by the iteration cap). The estimator alone takes 1, 5, 12 and 27 ms (Strain as measurement, Force as input, Baseline, Strain as input). If the tendon tensions stay fixed, the model is solved once and only the estimator time recurs.
 
 ## 6. Open issues and caveats
 
 **1. Both input methods can bow out of the plane.** An input fixes how the strain changes along the rod, but leaves its level partly free. The likely cause: with stretch and shear fixed, three numbers (twist and the two bending directions) are left free, and the tip measurement supplies three numbers. That equation has more than one solution: the in-plane S, and shapes that bow sideways (up to 17 mm) and still reach the measured tip. Which one the solver finds depends on the noise draw. A larger force makes the in-plane solution easier to find (for Force as input: 17 of 50 runs out of plane at 0 N, none at 0.30 N). **Checks:** add the tip orientation to the measurement, or combine an input method with a weakly trusted strain measurement that holds the bending level near the model's.
 
-**2. Strain as input converges slowly.** Under a force most of its runs stop at the 100-iteration limit (7 of 50 converge at 0.30 N). A test with 1000 iterations (20 runs per force) made every run converge, with similar errors: 3.0, 2.5 and 3.7 mm at 0, 0.15 and 0.30 N, at 17–95 ms per estimate. So its ranking holds, but its 1.5 mm at 0 N is partly flattered: unfinished runs stay near the starting shape, which at 0 N is the truth; run to convergence, more of them bow out of the plane (issue 1).
+**2. Strain as input converges slowly.** From 0.10 N on, most of its runs stop at the 100-iteration limit (5 of 50 converge at 0.30 N). A test with 1000 iterations (20 runs per force) made every run converge, with similar errors: 3.0, 2.5 and 3.7 mm at 0, 0.15 and 0.30 N, with an estimator time of 18–100 ms on average. So its ranking holds, but its 1.5 mm at 0 N is partly flattered: unfinished runs stay near the starting shape, which at 0 N is the truth; run to convergence, more of them bow out of the plane (issue 1).
 
 **3. The junction jump is smeared in Force as input.** A constant input per segment turns the step into a 20 mm ramp (visible in Figure 5). That costs ~1 mm of position error even with perfect information (adapter test F), and makes segment 2 overshoot. Strain as input does not have this problem.
 
@@ -228,9 +257,11 @@ With a real strain sensor (for example fibre Bragg gratings), σ would be that s
 
 **5. The inputs ignore how the tendon loads depend on the shape.** The inputs are computed once from the no-force shape, and the strain-only terms $N(\varepsilon)$ of R&W eq. 5 are left out of Force as input, as in the 2025 paper's model. For bending this is harmless here. For stretch and shear, though, the tendon force is almost exactly cancelled by $N(\varepsilon)$ (both ≈ 98 in this test). That part of the input is therefore physically wrong, and is only harmless because the Kirchhoff-rod setting fixes stretch and shear. This shape dependence is the planned thesis topic.
 
-**6. The Baseline and low-trust Strain as measurement improve as the force grows** (15.7 → 7.8 mm and 12.4 → 4.1 mm), even though the model gets worse. This force straightens the rod toward the smooth shape both lean toward anyway. Their ranking could change for other force directions. The Baseline also starts from a straight rod, and 41 of its 350 runs hit the 100-iteration limit, 24 of them at 0.25–0.30 N.
+**6. The Baseline and low-trust Strain as measurement improve as the force grows** (15.7 → 7.8 mm and 12.4 → 4.1 mm), even though the model gets worse. This force straightens the rod toward the smooth shape both lean toward anyway. Their ranking could change for other force directions. The Baseline also starts from a straight rod, and 42 of its 350 runs stop at the 100-iteration limit without converging, 24 of them at 0.25–0.30 N.
 
 **7. Scope.** One planar shape, one force direction, one noise level, simulated data only. The estimator's assumed tip noise (2.8 mm) does not match the simulated noise (1 mm).
+
+**8. Runs that stop at the iteration limit are sensitive to tiny changes in the data.** When the Cosserat solver was changed (2026-10-14), the model and ground truth moved by at most 0.11 µm. Every run that converged before and after changed its RMSE by less than 0.07 mm, but 34 runs that stopped at the 100-iteration limit in at least one version (26 Strain as input, 7 Baseline, 1 Force as input) changed by up to 1.6 mm: an unfinished run ends wherever the iterations happen to be. The means per method changed by at most 0.011 mm. Compare methods by their statistics over many runs, not by single runs.
 
 
 ## 7. Reproduce
@@ -241,15 +272,35 @@ Everything is driven by one script, [`scripts/evaluate.py`](../scripts/evaluate.
 cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_LOCAL_TDCR=ON -S . -B build
 cmake --build build
 
-python scripts/evaluate.py all     # runs every trust level and force (~1 min), then makes all figures
+python scripts/evaluate.py all     # runs every trust level and force (~1 min), times the stages, then makes all figures
 python scripts/evaluate.py plot    # re-plot only, from the saved data (seconds)
 ```
 
-`run` writes one row per run and method, including the error at every node, to `doc/figures/data/`. `plot` turns that data into the nine figures (300 dpi PNG, all the same size) and `summary.csv`, and prints the accuracy table. Options: `--rv` (trust levels σ), `--forces`, `--trials`, `--sigma` (sensor noise), `--shape-forces`, `--box-forces`, `--shape-rv`; see `python scripts/evaluate.py -h`.
+`run` writes one row per run and method, including the error at every node, to `doc/figures/data/`. `plot` turns that data into the nine figures (300 dpi PNG, all the same size), `summary.csv` and the timing tables, and prints the accuracy and timing tables. Options: `--rv` (trust levels σ), `--forces`, `--trials`, `--sigma` (sensor noise), `--shape-forces`, `--box-forces`, `--shape-rv`, `--timing-reps`, `--timing-force`; see `python scripts/evaluate.py -h`.
+
+### Reproduce the timing
+
+```bash
+python scripts/evaluate.py run       # estimator time of every run (time_ms in data/trials_rv*.csv)
+python scripts/evaluate.py timing    # every stage before the estimator, 300 repetitions each (a few seconds)
+python scripts/evaluate.py plot      # combines both; prints the tables of Section 4.7
+```
+
+What each step measures:
+
+| Number | Measured by | Written to |
+|---|---|---|
+| Estimator time per run: one `computeStateEstimate()` call | the driver, around that call only (`runEstimator`) | `data/trials_rv*.csv`, column `time_ms` |
+| Cosserat solve without the force (`model_solve`), warm-started solve (`model_solve_warm`), conversion (`dto`, `adapter_<method>`), estimator constructor (`estimator_construct_<method>`), ground-truth solve (`truth_solve`, not part of any method) | the driver with `--timing-csv FILE --timing-reps N` (`timePipelineStages`) | `data/timing_stages_raw.csv`, one row per repetition |
+| Median, IQR and 95th percentile of each stage | `plot` | `figures/timing_stages.csv` |
+| Time per estimate = model solve + conversion + constructor + estimator | `plot` (`write_timing`) | `figures/timing.csv` |
+
+For trustworthy times: use the Release build, keep the computer otherwise idle and on mains power, and report the CPU with the numbers (`plot` prints it). The estimator time of Strain as input depends on the iteration limit (`max_iterations` in the config).
 
 The driver can also be run directly. Useful extra options:
 - `--fx`, `--fy`, `--fz`: the force, in the Cosserat frame, whose $z$ is the base axis;
 - `--q F1,...,F6`: tendon tensions;
 - `--seed N`;
 - `--trials-csv FILE`: per-run results;
-- `--csv FILE`: shapes of one run.
+- `--csv FILE`: shapes of one run;
+- `--timing-csv FILE`, `--timing-reps N`: time every stage before the estimator.
