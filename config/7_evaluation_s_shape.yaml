@@ -58,8 +58,8 @@ hyperparameters:
   Qc_diagonal: [0.1, 0.1, 0.1, 1.0, 1.0, 1.0]
 
 options:
-  initial_guess: Custom         # driver overrides per method (Straight for Method 1,
-                                # Cosserat-derived Custom for Methods 2 and 3)
+  initial_guess: Custom         # driver overrides per method (Straight for the Baseline,
+                                # the model's shape for the other methods)
   solver: Newton                # the driver switches every method to NewtonLineSearch
   max_iterations: 100
   convergence_threshold: 1.0e-3

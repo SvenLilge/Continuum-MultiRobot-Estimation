@@ -58,13 +58,13 @@ PAGE = 7.16                  # IEEE two-column page width [inch]
 FIG_SIZE = (PAGE, 3.4)
 FS = 8                       # all text [pt]
 
-# Okabe-Ito colors (validated colorblind-safe for all pairs). Method 2 uses a
+# Okabe-Ito colors (validated colorblind-safe for all pairs). Strain as measurement uses a
 # light-to-dark ramp of its hue for increasing R_v (looser trust in the model).
 INK, INK_2, GRID = "#1a1a1a", "#555555", "#dddddd"
 MODEL_GRAY = "#8c8c8c"
 ERROR_LABEL = "Error vs. real shape [mm]"
-M1_COLOR, M3_COLOR = "#D55E00", "#0072B2"
-M2_RAMP = ["#79c9ad", "#009E73", "#00553e"]
+BASELINE_COLOR, FORCE_IN_COLOR, STRAIN_IN_COLOR = "#D55E00", "#0072B2", "#AA3377"
+STRAIN_MEAS_RAMP = ["#79c9ad", "#009E73", "#00553e"]
 
 
 # --------------------------------------------------------------------------- run
@@ -127,27 +127,29 @@ def build_series(df):
     """List of plotted series: (key, label, short label, style, rows).
 
     Names are the ones a paper reader sees; they must match the text.
-    Method 2's noise setting sigma (R_v = R_u in the config) is how much the
+    Strain as measurement's noise setting sigma (R_v = R_u in the config) is how much the
     estimator trusts the model: smaller sigma = more trust.
     """
     rvs = sorted(df["rv"].unique(), key=float)
     first = df[df["rv"] == rvs[0]]          # Baseline, force input and the model do not use R_v
-    ramp = M2_RAMP if len(rvs) == len(M2_RAMP) else [M2_RAMP[1]] * len(rvs)
+    ramp = STRAIN_MEAS_RAMP if len(rvs) == len(STRAIN_MEAS_RAMP) else [STRAIN_MEAS_RAMP[1]] * len(rvs)
     trust = dict(zip(rvs, ["high", "medium", "low"])) if len(rvs) == 3 else {}
     series = [
         ("model", "Model only (no estimator)", "Model\nonly",
-         dict(color=MODEL_GRAY, linestyle="--", marker=None), first[first["method"] == "0_model"]),
-        ("m1", "Baseline: tip measurement only", "Baseline",
-         dict(color=M1_COLOR, linestyle="--", marker="o"), first[first["method"] == "1_old"]),
+         dict(color=MODEL_GRAY, linestyle="--", marker=None), first[first["method"] == "model"]),
+        ("baseline", "Baseline: tip measurement only", "Baseline",
+         dict(color=BASELINE_COLOR, linestyle="--", marker="o"), first[first["method"] == "baseline"]),
     ]
     for rv, color in zip(rvs, ramp):
-        rows = df[(df["rv"] == rv) & (df["method"] == "2_strain")]
+        rows = df[(df["rv"] == rv) & (df["method"] == "strain_meas")]
         level = f"{trust[rv]} trust " if rv in trust else ""
-        series.append((f"m2_{rv}", rf"Strain as measurement, {level}($\sigma$ = {rv})",
+        series.append((f"strain_meas_{rv}", rf"Strain as measurement, {level}($\sigma$ = {rv})",
                        f"Strain\n{level.replace(' ', chr(10)).strip()}" if level else f"Strain\nσ={rv}",
                        dict(color=color, linestyle="-", marker="s"), rows))
-    series.append(("m3", "Force as input", "Force\ninput",
-                   dict(color=M3_COLOR, linestyle="-", marker="^"), first[first["method"] == "3_force"]))
+    series.append(("force_in", "Force as input", "Force\ninput",
+                   dict(color=FORCE_IN_COLOR, linestyle="-", marker="^"), first[first["method"] == "force_in"]))
+    series.append(("strain_in", "Strain as input", "Strain\ninput",
+                   dict(color=STRAIN_IN_COLOR, linestyle="-", marker="D"), first[first["method"] == "strain_in"]))
     return series
 
 
@@ -255,24 +257,39 @@ def panel(ax, i, text):
 
 
 def load_shape(fz, rv):
-    """Shape of one trial: node rows and the noisy tip measurement (node = -1)."""
+    """Shapes of one trial (one row per node), or None if the file is missing.
+
+    Columns <name>_x/_y/_z for: model, truth, tip_meas (the noisy tip
+    measurement, same on every row) and each method key.
+    """
     path = DATA_DIR / f"shape_rv{rv}_fz{fz}.csv"
-    if not path.exists():
-        return None, None
-    raw = pd.read_csv(path)
-    return raw[raw["node"] >= 0], raw[raw["node"] == -1]
+    return pd.read_csv(path) if path.exists() else None
 
 
 def bending_plane(shapes):
     """The two axes with the largest spread of the true and predicted shapes."""
-    allpts = pd.concat([s[[f"{w}_{c}" for w in ("prior", "truth") for c in "xyz"]] for s in shapes])
-    spread = {c: np.ptp(allpts[[f"prior_{c}", f"truth_{c}"]].values) for c in "xyz"}
+    allpts = pd.concat(shapes)
+    spread = {c: np.ptp(allpts[[f"model_{c}", f"truth_{c}"]].values) for c in "xyz"}
     return tuple(sorted(sorted(spread, key=spread.get)[-2:]))
+
+
+def shape_lines(series, shape_rv):
+    """(CSV column, legend label, style) of every estimated shape, plus truth and model."""
+    by_key = {s[0]: s for s in series}
+    strain_meas = by_key[f"strain_meas_{shape_rv}"]
+    return [
+        ("truth", "Ground truth", dict(color=INK, linestyle="-", marker="o", linewidth=2.0, markersize=3)),
+        ("model", by_key["model"][1], dict(color=MODEL_GRAY, linestyle="--", marker=None)),
+        ("baseline", by_key["baseline"][1], by_key["baseline"][3]),
+        ("strain_meas", strain_meas[1], strain_meas[3]),
+        ("force_in", by_key["force_in"][1], by_key["force_in"][3]),
+        ("strain_in", by_key["strain_in"][1], by_key["strain_in"][3]),
+    ]
 
 
 def fig_problem(series, fz, rv):
     """Concept figure: what the estimator must recover, and from what."""
-    s, tip = load_shape(fz, rv)
+    s = load_shape(fz, rv)
     if s is None:
         print("  (skipping fig1_problem, no shape data)")
         return
@@ -281,11 +298,11 @@ def fig_problem(series, fz, rv):
     headline(fig, "The estimation problem",
              "Recover the real shape (black) from one noisy tip position (star)")
     P = lambda col: (s[f"{col}_{a}"].values * 1000.0, s[f"{col}_{b}"].values * 1000.0)
-    xm, zm = P("prior")
+    xm, zm = P("model")
     xt, zt = P("truth")
     ax.plot(xm, zm, color=MODEL_GRAY, linestyle="--", linewidth=1.5)
     ax.plot(xt, zt, color=INK, linewidth=2.2, marker="o", markersize=3)
-    tx, tz = tip[f"m1_old_{a}"].iloc[0] * 1000.0, tip[f"m1_old_{b}"].iloc[0] * 1000.0
+    tx, tz = s[f"tip_meas_{a}"].iloc[0] * 1000.0, s[f"tip_meas_{b}"].iloc[0] * 1000.0
     ax.plot(tx, tz, marker="*", markersize=12, markerfacecolor="white", markeredgecolor=INK,
             markeredgewidth=0.9, linestyle="none", zorder=5)
     f = force_in_plot_frame(series, fz)
@@ -339,7 +356,7 @@ def fig_pipeline():
     box(17, 23, 17, 7.5, "Cosserat model\nwithout force")
     box(17, 2.5, 17, 7.5, "Cosserat model\nwith unknown force $F$", edge=INK, lw=1.1)
     box(40, 2.5, 13, 7.5, "Tip position\n+ noise (1 mm)")
-    box(60, 9.5, 17, 14, "Estimator\n\n" + "Baseline\nStrain as measurement\nForce as input", lw=1.0)
+    box(60, 9.5, 17, 14, "Estimator\n\n" + "Baseline\nStrain as measurement\nForce as input\nStrain as input", lw=1.0)
     box(84, 9.5, 15.5, 14, "Compare\nwith ground truth\n\n→ shape error [mm]")
     arrow(11.9, 18.5, 16.6, 26.5)
     arrow(11.9, 14.5, 16.6, 6.5)
@@ -367,23 +384,16 @@ def curvature_from_positions(s, col, a, b):
 
 def fig_curvature(series, forces, shape_rv, junction):
     """Why the methods differ: the bending curvature each one produces along the rod."""
-    loaded = {fz: load_shape(fz, shape_rv)[0] for fz in forces}
+    loaded = {fz: load_shape(fz, shape_rv) for fz in forces}
     if any(v is None for v in loaded.values()):
         print("  (skipping fig5_curvature, missing shape data)")
         return
     a, b = bending_plane(list(loaded.values()))
-    by_key = {s[0]: s for s in series}
-    lines = [
-        ("truth", "Ground truth", dict(color=INK, linestyle="-", marker="o", linewidth=2.0, markersize=3)),
-        ("prior", by_key["model"][1], dict(color=MODEL_GRAY, linestyle="--", marker=None)),
-        ("m1_old", by_key["m1"][1], by_key["m1"][3]),
-        ("m2_strain", by_key[f"m2_{shape_rv}"][1], by_key[f"m2_{shape_rv}"][3]),
-        ("m3_force", by_key["m3"][1], by_key["m3"][3]),
-    ]
+    lines = shape_lines(series, shape_rv)
     fig, axes = plt.subplots(1, len(forces), figsize=FIG_SIZE, sharey=True, layout="constrained")
     headline(fig, "Why the methods differ",
              "How each method bends the rod. The force weakens the bend in segment 1, but the flip at "
-             "the junction stays; only Force as input gets both right")
+             "the junction stays; Force as input gets both right")
     axes = np.atleast_1d(axes)
     for i, (ax, (fz, s)) in enumerate(zip(axes, loaded.items())):
         s_mm = s["s"].values[1:-1] * 1000.0
@@ -409,7 +419,7 @@ def fig_ranking(series):
         if key == "model":
             continue
         name = label
-        if key.startswith("m2_"):                   # "Strain as measurement, high trust (σ = 0.01)"
+        if key.startswith("strain_meas_"):          # "Strain as measurement, high trust (σ = 0.01)"
             head, tail = label.split(", ", 1)
             name = f"{head}\n{tail.replace(' trust', ' trust in model')}"
         rows.append((name, st["color"], d["rmse"].mean()))
@@ -545,29 +555,14 @@ def force_in_plot_frame(series, fz):
 
 
 def fig_shapes(series, forces, shape_rv):
-    files = {fz: DATA_DIR / f"shape_rv{shape_rv}_fz{fz}.csv" for fz in forces}
-    missing = [str(p.name) for p in files.values() if not p.exists()]
-    if missing:
-        print(f"  (skipping fig2_shapes, missing {', '.join(missing)})")
+    shapes = {fz: load_shape(fz, shape_rv) for fz in forces}
+    if any(v is None for v in shapes.values()):
+        print("  (skipping fig4_shapes, missing shape data)")
         return
-    # The driver appends one row with node = -1 holding the noisy tip measurement
-    # in the m1_old columns.
-    raw = {fz: pd.read_csv(p) for fz, p in files.items()}
-    shapes = {fz: r[r["node"] >= 0] for fz, r in raw.items()}
-    tips = {fz: r[r["node"] == -1] for fz, r in raw.items()}
     # Draw in the plane where the rod bends most: the two axes with the largest spread.
-    allpts = pd.concat([s[[f"{w}_{c}" for w in ("prior", "truth") for c in "xyz"]] for s in shapes.values()])
-    spread = {c: np.ptp(allpts[[f"prior_{c}", f"truth_{c}"]].values) for c in "xyz"}
-    a, b = sorted(sorted(spread, key=spread.get)[-2:])
-    by_key = {s[0]: s for s in series}
-    m2 = by_key[f"m2_{shape_rv}"]
-    lines = [
-        ("truth", "Ground truth (real shape, with tip force)", dict(color=INK, linestyle="-", marker="o", linewidth=2.0, markersize=3)),
-        ("prior", by_key["model"][1], dict(color=MODEL_GRAY, linestyle="--", marker=None)),
-        ("m1_old", by_key["m1"][1], by_key["m1"][3]),
-        ("m2_strain", m2[1], m2[3]),
-        ("m3_force", by_key["m3"][1], by_key["m3"][3]),
-    ]
+    a, b = bending_plane(list(shapes.values()))
+    lines = shape_lines(series, shape_rv)
+    lines[0] = ("truth", "Ground truth (real shape, with tip force)", lines[0][2])
     fig, axes = plt.subplots(1, len(forces), figsize=FIG_SIZE, layout="constrained")
     headline(fig, "What the estimates look like",
              "A method is good when its line lies on the black ground truth")
@@ -575,11 +570,9 @@ def fig_shapes(series, forces, shape_rv):
     for i, (ax, (fz, s)) in enumerate(zip(axes, shapes.items())):
         for col, label, st in lines:
             ax.plot(s[f"{col}_{a}"] * 1000.0, s[f"{col}_{b}"] * 1000.0, label=label, **st)
-        tip = tips[fz]
-        if not tip.empty:
-            ax.plot(tip[f"m1_old_{a}"] * 1000.0, tip[f"m1_old_{b}"] * 1000.0, marker="*", markersize=10,
-                    markerfacecolor="white", markeredgecolor=INK, markeredgewidth=0.8, linestyle="none",
-                    label="Noisy tip measurement (the only sensor)", zorder=5)
+        ax.plot(s[f"tip_meas_{a}"].iloc[:1] * 1000.0, s[f"tip_meas_{b}"].iloc[:1] * 1000.0, marker="*",
+                markersize=10, markerfacecolor="white", markeredgecolor=INK, markeredgewidth=0.8,
+                linestyle="none", label="Noisy tip measurement (the only sensor)", zorder=5)
         # Arrow for the unknown tip force, drawn at the true tip.
         f = force_in_plot_frame(series, fz)
         if f is not None and np.hypot(f[a], f[b]) > 0:
@@ -660,13 +653,13 @@ def cmd_plot(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", choices=["run", "plot", "all"])
-    p.add_argument("--rv", nargs="+", default=DEFAULT_RV, help="R_v = R_u levels for Method 2")
+    p.add_argument("--rv", nargs="+", default=DEFAULT_RV, help="R_v = R_u levels for Strain as measurement")
     p.add_argument("--forces", nargs="+", default=DEFAULT_FORCES, help="tip forces F_z [N]")
     p.add_argument("--trials", type=int, default=50, help="noise draws per force")
     p.add_argument("--sigma", type=float, default=0.001, help="tip noise std [m]")
     p.add_argument("--shape-forces", nargs="+", default=["0.10", "0.30"], help="forces for the shape overlays")
     p.add_argument("--box-forces", nargs="+", default=["0.00", "0.15", "0.30"], help="forces for figs 7 and 8")
-    p.add_argument("--shape-rv", default="0.5", help="R_v of Method 2 shown in the shape overlays")
+    p.add_argument("--shape-rv", default="0.5", help="R_v of Strain as measurement shown in the shape overlays")
     p.add_argument("--junction", type=float, default=0.10, help="segment junction arc length [m]; marked in figs 5 and 7")
     p.add_argument("--paper", action="store_true", help="no figure titles (the paper caption carries them)")
     args = p.parse_args()

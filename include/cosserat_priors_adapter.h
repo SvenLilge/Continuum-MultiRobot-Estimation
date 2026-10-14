@@ -55,13 +55,14 @@ struct EstimatorPriors
 //
 //   None           : model strain as strain measurements (value = model strain),
 //                    no control inputs. Initial-guess strain = model strain.
-//                    (Evaluation "Method 2".)
+//                    (Evaluation: "Strain as measurement".)
 //   StrainAsInput  : velocity input = model strain at the segment midpoint,
 //                    acceleration input = 0. The state strain
 //                    is then the bias, so measurements and initial-guess strain
 //                    are set to 0 ("the model strain is fully explained").
 //                    Do NOT also feed model-strain measurements: the rod would
-//                    be built from twice the strain.
+//                    be built from twice the strain. (Evaluation: "Strain as input",
+//                    which uses only the inputs.)
 //   ForceAsInput   : velocity input = 0, acceleration input = load-driven
 //                    strain derivative -K^-1 [f; l] (priors.epsilon_in_accel)
 //                    plus each interior strain jump -K^-1 [F; L]
@@ -71,7 +72,7 @@ struct EstimatorPriors
 //                    rod; its level must come from measurements.
 //                    Velocity input is zero, so bias = total strain:
 //                    measurements / initial-guess strain = model strain.
-//                    (Evaluation "Method 3", which uses only the inputs.)
+//                    (Evaluation: "Force as input", which uses only the inputs.)
 enum class ControlInputMode {
     None,
     StrainAsInput,

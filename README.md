@@ -150,7 +150,7 @@ If tdcr-modeling is elsewhere, add `-DTDCR_ROOT=/path/to/tdcr-modeling/c++`. Thi
 |---|---|
 | `cosserat_estimator_driver config/6_cosserat_priors.yaml` | Demo: Cosserat model -> estimator; checks that the estimated shape matches the model (`--visualize` opens a VTK window) |
 | `test_cosserat_adapter config/6_cosserat_priors.yaml` | Six validation tests of the bridge |
-| `evaluation_cosserat_priors` | Compares three ways of using the model when an unknown force pushes the robot; run through `python scripts/evaluate.py all` |
+| `evaluation_cosserat_priors` | Compares four ways of using the model when an unknown force pushes the robot; run through `python scripts/evaluate.py all` |
 
 - How the bridge works, its design and its checks: [`doc/cosserat_integration.md`](doc/cosserat_integration.md)
 - Evaluation and results: [`doc/evaluation.md`](doc/evaluation.md)

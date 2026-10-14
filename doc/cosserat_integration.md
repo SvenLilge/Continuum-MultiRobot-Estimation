@@ -5,7 +5,7 @@ This document explains how the Cosserat rod model from the sibling repository [`
 Reading order:
 
 1. **This document**: background, how the connection works, sanity checks.
-2. [`evaluation.md`](evaluation.md): the experiment comparing three ways of using the model, with results and open issues.
+2. [`evaluation.md`](evaluation.md): the experiment comparing four ways of using the model, with results and open issues.
 3. The physics of the rod model itself: [`tdcr-modeling/doc/cosserat_rod_model.md`](../../tdcr-modeling/doc/cosserat_rod_model.md).
 
 ---
@@ -86,8 +86,8 @@ Both bridge functions are in [`src/bridge/cosserat_priors_adapter.cpp`](../src/b
 | `v`, `u`, `v_dot`, `u_dot` | Strains and their derivatives (Cosserat body frame) |
 | `n_internal`, `m_internal`, `f_dist`, `l_dist` | Internal force/moment and tendon loads per unit length (world frame) |
 | `s_discrete`, `F_discrete`, `L_discrete` | Point loads where tendons end (junction and tip) |
-| `epsilon_in_accel` | $-[K_{se}^{-1} R^\top f_t;\ K_{bt}^{-1} R^\top l_t]$ at each sample: the strain derivative caused by the distributed tendon loads (R&W eq. 5). Used by Method 3 in the evaluation. |
-| `epsilon_jump_discrete` | $-[K_{se}^{-1} R^\top F;\ K_{bt}^{-1} R^\top L]$ per point load: the strain jump where tendons end (R&W eq. 20). Used by Method 3. |
+| `epsilon_in_accel` | $-[K_{se}^{-1} R^\top f_t;\ K_{bt}^{-1} R^\top l_t]$ at each sample: the strain derivative caused by the distributed tendon loads (R&W eq. 5). Used by Force as input in the evaluation. |
+| `epsilon_jump_discrete` | $-[K_{se}^{-1} R^\top F;\ K_{bt}^{-1} R^\top L]$ per point load: the strain jump where tendons end (R&W eq. 20). Used by Force as input. |
 
 `validate()` checks all array sizes and throws `std::invalid_argument` on a mismatch. The model's getters throw if the Cosserat solve did not converge, so bad data never reaches the estimator.
 
@@ -127,9 +127,9 @@ The `mode` argument picks one consistent combination:
 
 | `ControlInputMode` | Velocity input | Acceleration input | Strain measurements and initial strain | Used by |
 |---|---|---|---|---|
-| `None` (default) | none | none | Cosserat strain | Run B; evaluation Method 2 |
-| `StrainAsInput` | Cosserat strain at the segment midpoint | 0 | 0 (bias) | Run C |
-| `ForceAsInput` | 0 | `epsilon_in_accel`, plus each interior strain jump spread over the segment that starts at it | Cosserat strain (bias = total, because the velocity input is 0) | Evaluation Method 3 |
+| `None` (default) | none | none | Cosserat strain | Run B; evaluation: Strain as measurement |
+| `StrainAsInput` | Cosserat strain at the segment midpoint | 0 | 0 (bias) | Run C; evaluation: Strain as input |
+| `ForceAsInput` | 0 | `epsilon_in_accel`, plus each interior strain jump spread over the segment that starts at it | Cosserat strain (bias = total, because the velocity input is 0) | Evaluation: Force as input |
 
 The acceleration input is 0 in `StrainAsInput` because Lilge & Barfoot (2025) define it as independent of the velocity input, not as its derivative. The velocity input is sampled at the segment midpoint because it is constant over the segment. That also picks the correct side of the strain jump at the junction node.
 

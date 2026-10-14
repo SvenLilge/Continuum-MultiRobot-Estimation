@@ -1,21 +1,22 @@
-// Evaluation driver: Cosserat prior vs. baseline estimator on an S-shape under
-// an unknown tip-force disturbance.
+// Evaluation driver: four ways of giving the Cosserat model to the estimator,
+// compared on an S-shaped rod pushed by an unknown tip force.
 //
 // Pipeline:
 //   1. Load YAML config (topology + hyperparams + options).
-//   2. Cosserat solve A (prior, f_ext = 0) -> ContinuumRodPriors fed to the estimator.
-//   3. Cosserat solve B (real,  f_ext != 0) -> ground-truth disk frames.
-//   4. Build the EstimatorPriors package (deterministic, one-shot).
+//   2. Cosserat solve without the force -> model prediction, fed to the estimator.
+//   3. Cosserat solve with the force    -> ground truth (hidden from the estimator).
+//   4. Turn the model prediction into estimator inputs, once per method.
 //   5. For each of N trials (different noise seed each), synthesize a noisy
-//      tip-position measurement and run the estimator three ways:
-//        Method 1 (Baseline)              : noisy tip only, Straight init, no priors
-//        Method 2 (Strain as measurement) : noisy tip + Cosserat strain measurements
-//                                           (ControlInputMode::None)
-//        Method 3 (Force as input)        : noisy tip + acceleration inputs
-//                                           -K^-1 [f; l] + junction strain jump
-//                                           (ControlInputMode::ForceAsInput)
+//      tip-position measurement and run the estimator four ways:
+//        Baseline              : noisy tip only, straight start, nothing from the model
+//        Strain as measurement : noisy tip + model strain as measurements
+//                                (ControlInputMode::None)
+//        Force as input        : noisy tip + acceleration inputs -K^-1 [f; l]
+//                                + junction strain jump (ControlInputMode::ForceAsInput)
+//        Strain as input       : noisy tip + velocity inputs = model strain
+//                                (ControlInputMode::StrainAsInput)
 //   6. Report per-method RMSE / MaxErr / Time stats (mean ± std over N trials).
-//   7. Optionally dump the LAST trial's per-node positions to CSV for plotting.
+//   7. Optionally write per-run results and the last trial's shapes to CSV.
 //
 // Requires USE_LOCAL_TDCR=ON. See doc/evaluation.md for the experiment
 // design, results and open issues.
@@ -30,28 +31,57 @@
 #include <Eigen/Geometry>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <string>
 #include <vector>
 
-using Estimator       = ContinuumRobotStateEstimator;
-using SensorMeas      = Estimator::SensorMeasurement;
-using ControlInputT   = Estimator::ControlInput;
-using SystemStateT    = Estimator::SystemState;
+using Estimator    = ContinuumRobotStateEstimator;
+using SensorMeas   = Estimator::SensorMeasurement;
+using ControlInput = Estimator::ControlInput;
+using SystemState  = Estimator::SystemState;
+using Positions    = std::vector<Eigen::Vector3d>;   // one position per estimation node
 
 namespace {
 
-// Cosserat body (z-forward) -> estimator body (x-forward).
+// ----- The compared methods ----------------------------------------------------
+
+enum Method { Baseline, StrainMeas, ForceIn, StrainIn, N_METHODS };
+
+const char* kMethodName[N_METHODS] = { "Baseline (tip only)",
+                                       "Strain as measurement",
+                                       "Force as input",
+                                       "Strain as input" };
+const char* kTableLabel[N_METHODS] = { "1. Baseline (tip only)",
+                                       "2. Strain as measurement",
+                                       "3. Force as input",
+                                       "4. Strain as input" };
+// Method keys in the CSV files (scripts/evaluate.py reads them).
+const char* kKey[N_METHODS]        = { "baseline", "strain_meas", "force_in", "strain_in" };
+
+// What the estimator gets from the model for one method: solver options
+// (starting shape), model measurements and control inputs. Built once.
+struct MethodSetup
+{
+    Estimator::Options        options;
+    std::vector<SensorMeas>   model_measurements;
+    std::vector<ControlInput> control_inputs;
+};
+
+// ----- Frames and positions ----------------------------------------------------
+
+// Cosserat body axes (z-forward) -> estimator body axes (x-forward).
 // Same cyclic permutation the adapter uses internally; redefined here because
 // the adapter keeps it in an anonymous namespace.
-const Eigen::Matrix3d& rotConv()
+const Eigen::Matrix3d& cosseratToEstimatorAxes()
 {
     static const Eigen::Matrix3d R = (Eigen::Matrix3d() <<
         0, 0, 1,
@@ -60,24 +90,25 @@ const Eigen::Matrix3d& rotConv()
     return R;
 }
 
-Eigen::Matrix4d nearestDiskFrame(double s_k,
-                                 const Eigen::VectorXd& s,
+Eigen::Matrix4d nearestDiskFrame(double s,
+                                 const Eigen::VectorXd& s_disks,
                                  const Eigen::MatrixXd& diskFrames)
 {
-    const Eigen::Index N = s.size();
+    const Eigen::Index N = s_disks.size();
     Eigen::Index best = 0;
-    double best_dist = std::abs(s(0) - s_k);
+    double best_dist = std::abs(s_disks(0) - s);
     for (Eigen::Index j = 1; j < N; ++j) {
-        const double d = std::abs(s(j) - s_k);
+        const double d = std::abs(s_disks(j) - s);
         if (d < best_dist) { best_dist = d; best = j; }
     }
     return diskFrames.block(0, 4 * best, 4, 4);
 }
 
-Eigen::Matrix4d cosseratToInertial(const Eigen::Matrix4d& T_cos,
-                                   const Eigen::Matrix4d& Ti0)
+// Cosserat disk frame -> world frame of the estimator (base pose Ti0).
+Eigen::Matrix4d cosseratFrameToWorld(const Eigen::Matrix4d& T_cos,
+                                     const Eigen::Matrix4d& Ti0)
 {
-    const Eigen::Matrix3d& R_conv = rotConv();
+    const Eigen::Matrix3d& R_conv = cosseratToEstimatorAxes();
     const Eigen::Matrix3d  R_convT = R_conv.transpose();
 
     Eigen::Matrix4d T_body = Eigen::Matrix4d::Identity();
@@ -86,69 +117,55 @@ Eigen::Matrix4d cosseratToInertial(const Eigen::Matrix4d& T_cos,
     return Ti0 * T_body;
 }
 
-std::vector<Eigen::Vector3d> cosseratPositionsAtNodes(
-    const Eigen::MatrixXd& diskFrames,
-    const Eigen::VectorXd& s_disk,
-    const Eigen::Matrix4d& Ti0,
-    unsigned int K,
-    double L)
+// Cosserat shape sampled at the K estimation nodes, in the world frame.
+Positions nodePositionsFromCosserat(const Eigen::MatrixXd& diskFrames,
+                                    const Eigen::VectorXd& s_disks,
+                                    const Eigen::Matrix4d& Ti0,
+                                    unsigned int K,
+                                    double L)
 {
-    std::vector<Eigen::Vector3d> p(K);
+    Positions p(K);
     for (unsigned int k = 0; k < K; ++k) {
         const double s_k = (static_cast<double>(k) / (K - 1)) * L;
-        const Eigen::Matrix4d T_cos = nearestDiskFrame(s_k, s_disk, diskFrames);
-        const Eigen::Matrix4d T_in  = cosseratToInertial(T_cos, Ti0);
-        p[k] = T_in.block(0, 3, 3, 1);
+        const Eigen::Matrix4d T_cos = nearestDiskFrame(s_k, s_disks, diskFrames);
+        p[k] = cosseratFrameToWorld(T_cos, Ti0).block(0, 3, 3, 1);
     }
     return p;
 }
 
-std::pair<double, double> positionErrors(
-    const SystemStateT& state,
-    const std::vector<Eigen::Vector3d>& p_gt,
-    unsigned int robot_idx)
+Positions nodePositionsOf(const SystemState& state, unsigned int robot_idx)
 {
     const auto& nodes = state.robots.at(robot_idx).estimation_nodes;
-    const std::size_t K = std::min<std::size_t>(nodes.size(), p_gt.size());
-    double sse = 0.0;
-    double max_err = 0.0;
-    for (std::size_t k = 0; k < K; ++k) {
-        const Eigen::Vector3d p_est = nodes[k].pose.block(0, 3, 3, 1);
-        const double e = (p_est - p_gt[k]).norm();
-        sse += e * e;
-        if (e > max_err) max_err = e;
-    }
-    const double rmse = (K > 0) ? std::sqrt(sse / static_cast<double>(K)) : 0.0;
-    return { rmse, max_err };
+    Positions p(nodes.size());
+    for (std::size_t k = 0; k < nodes.size(); ++k) p[k] = nodes[k].pose.block(0, 3, 3, 1);
+    return p;
 }
 
-// Per-node position error [m] between an estimate and the ground truth.
-std::vector<double> nodeErrors(
-    const SystemStateT& state,
-    const std::vector<Eigen::Vector3d>& p_gt,
-    unsigned int robot_idx)
+// ----- Errors ------------------------------------------------------------------
+
+// Distance [m] between two shapes at each node.
+std::vector<double> errorPerNode(const Positions& p, const Positions& p_truth)
 {
-    const auto& nodes = state.robots.at(robot_idx).estimation_nodes;
-    const std::size_t K = std::min<std::size_t>(nodes.size(), p_gt.size());
+    const std::size_t K = std::min(p.size(), p_truth.size());
     std::vector<double> e(K);
-    for (std::size_t k = 0; k < K; ++k)
-        e[k] = (Eigen::Vector3d(nodes[k].pose.block(0, 3, 3, 1)) - p_gt[k]).norm();
+    for (std::size_t k = 0; k < K; ++k) e[k] = (p[k] - p_truth[k]).norm();
     return e;
 }
 
-std::string fmtSci(double v, int width = 12, int prec = 4)
+double rmseOf(const std::vector<double>& e)
 {
-    std::ostringstream os;
-    os << std::setw(width) << std::scientific << std::setprecision(prec) << v;
-    return os.str();
+    if (e.empty()) return 0.0;
+    double sse = 0.0;
+    for (double x : e) sse += x * x;
+    return std::sqrt(sse / static_cast<double>(e.size()));
 }
 
-std::string fmtFix(double v, int width = 10, int prec = 2)
+double maxOf(const std::vector<double>& e)
 {
-    std::ostringstream os;
-    os << std::setw(width) << std::fixed << std::setprecision(prec) << v;
-    return os.str();
+    return e.empty() ? 0.0 : *std::max_element(e.begin(), e.end());
 }
+
+// ----- Formatting --------------------------------------------------------------
 
 void printBanner(const std::string& title)
 {
@@ -175,46 +192,22 @@ std::string fmtVec3Mm(const Eigen::Vector3d& v, int width = 7, int prec = 1)
 //
 // The core "{6w} ± {6w}" format always produces exactly 15 visual columns
 // (6 + space + ± + space + 6); we pad with leading spaces to the target.
-std::string fmtMmStd(double mean_m, double std_m, int visual_width = 16, int prec = 2)
+std::string fmtMeanStd(double mean, double std, int visual_width = 16, int prec = 2)
 {
     std::ostringstream os;
     os << std::fixed << std::setprecision(prec)
-       << std::setw(6) << mean_m * 1000.0 << " ± "
-       << std::setw(6) << std_m  * 1000.0;
-    std::string s = os.str();
+       << std::setw(6) << mean << " ± "
+       << std::setw(6) << std;
     const int pad = std::max(0, visual_width - 15);
-    return std::string(pad, ' ') + s;
-}
-std::string fmtMsStd(double mean_ms, double std_ms, int visual_width = 16, int prec = 2)
-{
-    std::ostringstream os;
-    os << std::fixed << std::setprecision(prec)
-       << std::setw(6) << mean_ms << " ± "
-       << std::setw(6) << std_ms;
-    std::string s = os.str();
-    const int pad = std::max(0, visual_width - 15);
-    return std::string(pad, ' ') + s;
+    return std::string(pad, ' ') + os.str();
 }
 
-// Backbone RMSE of the (no-force) Cosserat prior shape against the (with-force)
-// ground-truth shape. This is the "what if we used the prior directly, with no
-// estimator at all?" baseline that all three methods are competing against.
-double priorTruthRmse(const std::vector<Eigen::Vector3d>& p_prior,
-                      const std::vector<Eigen::Vector3d>& p_gt)
-{
-    if (p_prior.empty() || p_prior.size() != p_gt.size()) return 0.0;
-    double sse = 0.0;
-    for (std::size_t k = 0; k < p_prior.size(); ++k) {
-        const double e = (p_prior[k] - p_gt[k]).norm();
-        sse += e * e;
-    }
-    return std::sqrt(sse / static_cast<double>(p_prior.size()));
-}
+// ----- Command line ------------------------------------------------------------
 
 struct Args
 {
     std::string  config_path;
-    std::string  csv_path = "";              // if non-empty, dump last trial here
+    std::string  csv_path = "";              // if non-empty, write the last trial's shapes here
     std::string  trials_csv_path = "";       // if non-empty, append one row per trial and method
     unsigned int n_trials = 1;               // multi-seed averaging
     double       sigma   = 0.001;            // tip-position noise std [m]
@@ -288,132 +281,83 @@ bool parseArgs(int argc, char* argv[], Args& a)
     return true;
 }
 
-// ----- Per-trial result --------------------------------------------------------
+// ----- One estimate, one trial -------------------------------------------------
 
-struct TrialMetrics
+using Clock = std::chrono::steady_clock;
+double msSince(Clock::time_point t0)
 {
-    bool        ok_old, ok_strain, ok_force;
-    double      rmse_old, rmse_strain, rmse_force;
-    double      max_old,  max_strain,  max_force;
-    double      time_old, time_strain, time_force;
-    std::size_t iters_old, iters_strain, iters_force;
-    unsigned int seed;
-    std::vector<double> err_old, err_strain, err_force;   // per-node position error [m]
-};
-
-struct TrialState
-{
-    Eigen::Matrix4d T_tip_noisy;
-    SystemStateT    state_old, state_strain, state_force;
-};
-
-auto clock_now() { return std::chrono::steady_clock::now(); }
-double ms_between(std::chrono::steady_clock::time_point a,
-                  std::chrono::steady_clock::time_point b)
-{
-    return std::chrono::duration<double, std::milli>(b - a).count();
+    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
-TrialMetrics runTrial(
-    const Estimator::RobotTopology& topology,
-    const Estimator::Hyperparameters& params,
-    const Estimator::Options& base_opts_robust,
-    const EstimatorPriors& ep_strain,
-    const EstimatorPriors& ep_force,
-    const Eigen::MatrixXd& diskFrames_real,
-    const Eigen::VectorXd& s_disk_real,
-    const Eigen::Matrix4d& Ti0,
-    const std::vector<Eigen::Vector3d>& p_gt,
-    unsigned int robot_idx,
-    unsigned int K,
-    double L,
-    double sigma,
-    unsigned int seed,
-    TrialState* opt_state_out)
+// Result of one estimator run.
+struct MethodResult
+{
+    bool                converged = false;
+    double              rmse = 0.0;          // [m]
+    double              max_err = 0.0;       // [m]
+    double              time_ms = 0.0;       // computeStateEstimate() only
+    std::size_t         iterations = 0;
+    std::vector<double> node_err;            // [m], one per node
+    Positions           shape;               // estimated node positions
+};
+
+struct TrialResult
+{
+    unsigned int                          seed;
+    Eigen::Matrix4d                       T_tip_noisy;
+    std::array<MethodResult, N_METHODS>   method;
+};
+
+MethodResult runEstimator(const Estimator::RobotTopology& topology,
+                          const Estimator::Hyperparameters& params,
+                          const MethodSetup& setup,
+                          const SensorMeas& tip_meas,
+                          const Positions& p_truth,
+                          unsigned int robot_idx)
+{
+    std::vector<SensorMeas> measurements = setup.model_measurements;
+    measurements.push_back(tip_meas);
+
+    Estimator estimator(topology, params, setup.options);
+    SystemState state;
+    std::vector<double> cost;
+    const auto t0 = Clock::now();
+    const bool converged = estimator.computeStateEstimate(
+        state, cost, measurements, setup.control_inputs, false);
+
+    MethodResult r;
+    r.time_ms    = msSince(t0);
+    r.converged  = converged;
+    r.iterations = cost.size();
+    r.shape      = nodePositionsOf(state, robot_idx);
+    r.node_err   = errorPerNode(r.shape, p_truth);
+    r.rmse       = rmseOf(r.node_err);
+    r.max_err    = maxOf(r.node_err);
+    return r;
+}
+
+// Noisy tip position measurement (position only, mask = [1,1,1,0,0,0]).
+SensorMeas noisyTipMeasurement(const Eigen::Matrix4d& T_tip_true,
+                               double sigma, unsigned int seed,
+                               unsigned int robot_idx, unsigned int K)
 {
     std::mt19937 rng(seed);
     std::normal_distribution<double> noise(0.0, sigma);
-
-    // Noisy tip measurement (position only, mask = [1,1,1,0,0,0])
-    const Eigen::Matrix4d T_cos_tip = nearestDiskFrame(L, s_disk_real, diskFrames_real);
-    Eigen::Matrix4d T_tip = cosseratToInertial(T_cos_tip, Ti0);
+    Eigen::Matrix4d T_tip = T_tip_true;
     T_tip(0, 3) += noise(rng);
     T_tip(1, 3) += noise(rng);
     T_tip(2, 3) += noise(rng);
 
-    SensorMeas tip_meas;
-    tip_meas.type      = SensorMeas::Pose;
-    tip_meas.value     = T_tip;
-    tip_meas.mask      << 1, 1, 1, 0, 0, 0;
-    tip_meas.idx_robot = robot_idx;
-    tip_meas.idx_node  = K - 1;
-
-    // Method 1: Baseline -- noisy tip only, Straight init, no priors
-    auto opts_old = base_opts_robust;
-    opts_old.init_guess_type = Estimator::Options::Straight;
-    Estimator est_old(topology, params, opts_old);
-    SystemStateT state_old;
-    std::vector<double> cost_old;
-    const auto t1_0 = clock_now();
-    const bool ok_old = est_old.computeStateEstimate(
-        state_old, cost_old, { tip_meas }, {}, false);
-    const double t_old = ms_between(t1_0, clock_now());
-
-    // Method 2: Strain as measurement -- noisy tip + strain measurements, Cosserat init
-    auto opts_strain = base_opts_robust;
-    opts_strain.init_guess_type = Estimator::Options::Custom;
-    opts_strain.custom_guess    = ep_strain.initial_guess;
-    std::vector<SensorMeas> meas_strain = ep_strain.measurements;
-    meas_strain.push_back(tip_meas);
-    Estimator est_strain(topology, params, opts_strain);
-    SystemStateT state_strain;
-    std::vector<double> cost_strain;
-    const auto t2_0 = clock_now();
-    const bool ok_strain = est_strain.computeStateEstimate(
-        state_strain, cost_strain, meas_strain, {}, false);
-    const double t_strain = ms_between(t2_0, clock_now());
-
-    // Method 3: Force as input -- noisy tip + load-driven strain derivative
-    // -K^-1 [f; l] plus the junction strain jump on the acceleration channel,
-    // Cosserat init.
-    auto opts_force = base_opts_robust;
-    opts_force.init_guess_type = Estimator::Options::Custom;
-    opts_force.custom_guess    = ep_force.initial_guess;
-    Estimator est_force(topology, params, opts_force);
-    SystemStateT state_force;
-    std::vector<double> cost_force;
-    const auto t3_0 = clock_now();
-    const bool ok_force = est_force.computeStateEstimate(
-        state_force, cost_force, { tip_meas }, ep_force.control_inputs, false);
-    const double t_force = ms_between(t3_0, clock_now());
-
-    const auto [rmse_old,    max_old]    = positionErrors(state_old,    p_gt, robot_idx);
-    const auto [rmse_strain, max_strain] = positionErrors(state_strain, p_gt, robot_idx);
-    const auto [rmse_force,  max_force]  = positionErrors(state_force,  p_gt, robot_idx);
-
-    if (opt_state_out) {
-        opt_state_out->T_tip_noisy  = T_tip;
-        opt_state_out->state_old    = state_old;
-        opt_state_out->state_strain = state_strain;
-        opt_state_out->state_force  = state_force;
-    }
-
-    TrialMetrics m;
-    m.ok_old     = ok_old;     m.ok_strain     = ok_strain;     m.ok_force     = ok_force;
-    m.rmse_old   = rmse_old;   m.rmse_strain   = rmse_strain;   m.rmse_force   = rmse_force;
-    m.max_old    = max_old;    m.max_strain    = max_strain;    m.max_force    = max_force;
-    m.time_old   = t_old;      m.time_strain   = t_strain;      m.time_force   = t_force;
-    m.iters_old  = cost_old.size();
-    m.iters_strain = cost_strain.size();
-    m.iters_force  = cost_force.size();
-    m.seed       = seed;
-    m.err_old    = nodeErrors(state_old,    p_gt, robot_idx);
-    m.err_strain = nodeErrors(state_strain, p_gt, robot_idx);
-    m.err_force  = nodeErrors(state_force,  p_gt, robot_idx);
+    SensorMeas m;
+    m.type      = SensorMeas::Pose;
+    m.value     = T_tip;
+    m.mask      << 1, 1, 1, 0, 0, 0;
+    m.idx_robot = robot_idx;
+    m.idx_node  = K - 1;
     return m;
 }
 
-// ----- Aggregation -------------------------------------------------------------
+// ----- Statistics --------------------------------------------------------------
 
 struct Stat { double mean, std; };
 
@@ -431,57 +375,103 @@ Stat meanStd(const std::vector<double>& v)
     return { m, sd };
 }
 
-// ----- CSV ---------------------------------------------------------------------
-
-void writeCSV(const std::string& path,
-              const std::vector<Eigen::Vector3d>& p_prior,
-              const std::vector<Eigen::Vector3d>& p_gt,
-              const TrialState& last,
-              unsigned int robot_idx,
-              double L)
+struct MethodStats
 {
-    const std::size_t K = p_gt.size();
+    Stat        rmse, max_err, time_ms;   // rmse/max_err in [m]
+    std::size_t converged;
+};
+
+MethodStats statsOf(const std::vector<TrialResult>& trials, int method)
+{
+    std::vector<double> rmse, max_err, time_ms;
+    std::size_t converged = 0;
+    for (const auto& t : trials) {
+        const MethodResult& r = t.method[method];
+        rmse.push_back(r.rmse);
+        max_err.push_back(r.max_err);
+        time_ms.push_back(r.time_ms);
+        if (r.converged) ++converged;
+    }
+    return { meanStd(rmse), meanStd(max_err), meanStd(time_ms), converged };
+}
+
+// ----- CSV output --------------------------------------------------------------
+
+// Shapes of one trial, one row per node: the model, the truth, the noisy tip
+// measurement (same on every row) and each method's estimate. Positions in m.
+void writeShapeCsv(const std::string& path,
+                   const Positions& p_model,
+                   const Positions& p_truth,
+                   const TrialResult& trial,
+                   double L)
+{
+    const std::size_t K = p_truth.size();
     std::ofstream f(path);
     if (!f) {
         std::cerr << "Failed to open CSV path: " << path << "\n";
         return;
     }
-    f << "node,s,"
-      << "prior_x,prior_y,prior_z,"
-      << "truth_x,truth_y,truth_z,"
-      << "m1_old_x,m1_old_y,m1_old_z,"
-      << "m2_strain_x,m2_strain_y,m2_strain_z,"
-      << "m3_force_x,m3_force_y,m3_force_z\n";
+    auto header = [&](const char* name) { f << "," << name << "_x," << name << "_y," << name << "_z"; };
+    f << "node,s";
+    header("model");
+    header("truth");
+    header("tip_meas");
+    for (int m = 0; m < N_METHODS; ++m) header(kKey[m]);
+    f << "\n";
 
-    const auto& nodes_old    = last.state_old.robots.at(robot_idx).estimation_nodes;
-    const auto& nodes_strain = last.state_strain.robots.at(robot_idx).estimation_nodes;
-    const auto& nodes_force  = last.state_force.robots.at(robot_idx).estimation_nodes;
+    auto writeXyz = [&](const Eigen::Vector3d& p) { f << "," << p(0) << "," << p(1) << "," << p(2); };
+    const Eigen::Vector3d tip_meas = trial.T_tip_noisy.block(0, 3, 3, 1);
 
     f << std::setprecision(8) << std::fixed;
     for (std::size_t k = 0; k < K; ++k) {
         const double s_k = (K > 1) ? (static_cast<double>(k) / (K - 1)) * L : 0.0;
-        const Eigen::Vector3d p_p = p_prior[k];
-        const Eigen::Vector3d p_t = p_gt[k];
-        const Eigen::Vector3d p_1 = nodes_old   [k].pose.block(0, 3, 3, 1);
-        const Eigen::Vector3d p_2 = nodes_strain[k].pose.block(0, 3, 3, 1);
-        const Eigen::Vector3d p_3 = nodes_force [k].pose.block(0, 3, 3, 1);
-        f << k << "," << s_k << ","
-          << p_p(0) << "," << p_p(1) << "," << p_p(2) << ","
-          << p_t(0) << "," << p_t(1) << "," << p_t(2) << ","
-          << p_1(0) << "," << p_1(1) << "," << p_1(2) << ","
-          << p_2(0) << "," << p_2(1) << "," << p_2(2) << ","
-          << p_3(0) << "," << p_3(1) << "," << p_3(2) << "\n";
+        f << k << "," << s_k;
+        writeXyz(p_model[k]);
+        writeXyz(p_truth[k]);
+        writeXyz(tip_meas);
+        for (int m = 0; m < N_METHODS; ++m) writeXyz(trial.method[m].shape[k]);
+        f << "\n";
     }
-    // Append the noisy tip measurement as a special row (node = -1)
-    f << "-1,"     // node
-      << L  << "," // arclength = tip
-      << "0,0,0," // prior placeholder
-      << "0,0,0," // truth placeholder
-      << last.T_tip_noisy(0, 3) << "," << last.T_tip_noisy(1, 3) << "," << last.T_tip_noisy(2, 3) << ","
-      << "0,0,0,"
-      << "0,0,0\n";
+    std::cout << "Wrote CSV: " << path << " (" << K << " nodes)\n";
+}
 
-    std::cout << "Wrote CSV: " << path << " (" << K << " nodes + 1 tip-measurement row)\n";
+// One row per trial and method, plus one "model" row (trial = -1) for the
+// model on its own. Appends; writes the header only when the file is new.
+// Errors in metres; e0..e{K-1} are the per-node position errors.
+void appendTrialsCsv(const std::string& path, const Args& args, double L,
+                     const std::vector<double>& model_err,
+                     const std::vector<TrialResult>& trials)
+{
+    const std::size_t K = model_err.size();
+    const bool exists = std::ifstream(path).good();
+    std::ofstream f(path, std::ios::app);
+    if (!f) {
+        std::cerr << "Failed to open trials-csv path: " << path << "\n";
+        return;
+    }
+    if (!exists) {
+        f << "fx,fy,fz,sigma,L,trial,seed,method,rmse,max_err,time_ms,iterations,converged";
+        for (std::size_t k = 0; k < K; ++k) f << ",e" << k;
+        f << "\n";
+    }
+    f << std::setprecision(9);
+    auto writeRow = [&](long trial, long seed, const char* method, double rmse, double max_err,
+                        double time_ms, std::size_t iters, bool converged,
+                        const std::vector<double>& err) {
+        f << args.fx << "," << args.fy << "," << args.fz << "," << args.sigma << ","
+          << L << "," << trial << "," << seed << "," << method << ","
+          << rmse << "," << max_err << "," << time_ms << "," << iters << ","
+          << (converged ? 1 : 0);
+        for (double e : err) f << "," << e;
+        f << "\n";
+    };
+    writeRow(-1, -1, "model", rmseOf(model_err), maxOf(model_err), 0.0, 0, true, model_err);
+    for (std::size_t t = 0; t < trials.size(); ++t)
+        for (int m = 0; m < N_METHODS; ++m) {
+            const MethodResult& r = trials[t].method[m];
+            writeRow(t, trials[t].seed, kKey[m], r.rmse, r.max_err, r.time_ms,
+                     r.iterations, r.converged, r.node_err);
+        }
 }
 
 } // anonymous namespace
@@ -522,142 +512,123 @@ int main(int argc, char* argv[])
 
     Eigen::Matrix<double, 6, 1> q;
     q << args.q0, args.q1, args.q2, args.q3, args.q4, args.q5;
-    const Eigen::Vector3d F_disturb(args.fx, args.fy, args.fz);
-    const Eigen::Vector3d L_disturb = Eigen::Vector3d::Zero();
+    const Eigen::Vector3d tip_force(args.fx, args.fy, args.fz);
+    const Eigen::Vector3d tip_moment = Eigen::Vector3d::Zero();
     const double L1 = 0.1, L2 = 0.1;
 
-    // --- 2. Cosserat solves --------------------------------------------------
-    CosseratRodModel model_prior;
-    Eigen::MatrixXd diskFrames_prior;
-    if (!model_prior.forwardKinematics(diskFrames_prior, q,
-                                       Eigen::Vector3d::Zero(),
-                                       Eigen::Vector3d::Zero())
-        || !model_prior.hasAuxOutputs()) {
+    // --- 2. Cosserat solves: model (no force) and ground truth (with force) --
+    CosseratRodModel rod_model;
+    Eigen::MatrixXd diskFrames_model;
+    if (!rod_model.forwardKinematics(diskFrames_model, q,
+                                     Eigen::Vector3d::Zero(),
+                                     Eigen::Vector3d::Zero())
+        || !rod_model.hasAuxOutputs()) {
         std::cerr << "Cosserat prior solve FAILED (residual = "
-                  << model_prior.getFinalResudial() << ")\n";
+                  << rod_model.getFinalResudial() << ")\n";
         return 1;
     }
-    const ContinuumRodPriors priors = priorsFromCosseratModel(model_prior, L1, L2, diskFrames_prior);
-    const Eigen::VectorXd s_disk_prior = model_prior.getArclengthSamples();
+    const ContinuumRodPriors priors = priorsFromCosseratModel(rod_model, L1, L2, diskFrames_model);
+    const Eigen::VectorXd s_disks_model = rod_model.getArclengthSamples();
 
-    CosseratRodModel model_real;
-    // Warm-start the real solve from the prior's converged shooting state.
+    CosseratRodModel rod_truth;
+    // Warm-start the real solve from the model's converged shooting state.
     // The default initial guess (straight rod) diverges for tip forces above
     // ~0.02 N when the rod is already heavily bent by tendon tensions; using
-    // the prior's converged (u0, v0) as the starting point lets the shooting
+    // the model's converged (u0, v0) as the starting point lets the shooting
     // method converge cleanly for much larger disturbances.
-    model_real.setDefaultInitValues(model_prior.getFinalInitValues());
-    Eigen::MatrixXd diskFrames_real;
-    if (!model_real.forwardKinematics(diskFrames_real, q, F_disturb, L_disturb)
-        || !model_real.hasAuxOutputs()) {
+    rod_truth.setDefaultInitValues(rod_model.getFinalInitValues());
+    Eigen::MatrixXd diskFrames_truth;
+    if (!rod_truth.forwardKinematics(diskFrames_truth, q, tip_force, tip_moment)
+        || !rod_truth.hasAuxOutputs()) {
         std::cerr << "Cosserat real solve FAILED (residual = "
-                  << model_real.getFinalResudial() << ")\n";
+                  << rod_truth.getFinalResudial() << ")\n";
         return 1;
     }
-    const Eigen::VectorXd s_disk_real = model_real.getArclengthSamples();
+    const Eigen::VectorXd s_disks_truth = rod_truth.getArclengthSamples();
 
-    const auto p_prior = cosseratPositionsAtNodes(diskFrames_prior, s_disk_prior, Ti0, K, L);
-    const auto p_gt    = cosseratPositionsAtNodes(diskFrames_real,  s_disk_real,  Ti0, K, L);
-    const double prior_truth_rmse = priorTruthRmse(p_prior, p_gt);
+    const Positions p_model = nodePositionsFromCosserat(diskFrames_model, s_disks_model, Ti0, K, L);
+    const Positions p_truth = nodePositionsFromCosserat(diskFrames_truth, s_disks_truth, Ti0, K, L);
+    const std::vector<double> model_err = errorPerNode(p_model, p_truth);
+    const double model_rmse = rmseOf(model_err);
+    const Eigen::Matrix4d T_tip_true =
+        cosseratFrameToWorld(nearestDiskFrame(L, s_disks_truth, diskFrames_truth), Ti0);
 
-    // --- 3. Adapter (once each, deterministic) ------------------------------
-    // M2 uses the model strain as measurements (mode None: no control inputs);
-    // M3 uses only the ForceAsInput control inputs. Initial guesses are
-    // identical in the two outputs (velocity input is zero in both).
-    const auto t_adapter0 = clock_now();
-    const EstimatorPriors ep_strain = cosseratPriorsToEstimator(
-        priors, topology, robot_idx, diskFrames_prior,
-        ControlInputMode::None);
-    const EstimatorPriors ep_force  = cosseratPriorsToEstimator(
-        priors, topology, robot_idx, diskFrames_prior,
-        ControlInputMode::ForceAsInput);
-    const double adapter_ms = ms_between(t_adapter0, clock_now());
+    // --- 3. What each method gets from the model (once, deterministic) ------
+    // Strain as measurement: model strain as measurements, no control inputs.
+    // Force / Strain as input: control inputs only; the starting shape is the
+    // model's (with zero strain bias for Strain as input).
+    const auto t_adapter0 = Clock::now();
+    const EstimatorPriors from_model[N_METHODS] = {
+        {},
+        cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames_model, ControlInputMode::None),
+        cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames_model, ControlInputMode::ForceAsInput),
+        cosseratPriorsToEstimator(priors, topology, robot_idx, diskFrames_model, ControlInputMode::StrainAsInput),
+    };
+    const double adapter_ms = msSince(t_adapter0);
 
-    auto base_opts_robust = base_options;
-    base_opts_robust.solver = Estimator::Options::NewtonLineSearch;
+    auto solver_options = base_options;
+    solver_options.solver = Estimator::Options::NewtonLineSearch;
 
-    // --- 4. Trial loop ------------------------------------------------------
-    std::vector<TrialMetrics> trials;
+    std::array<MethodSetup, N_METHODS> setup;
+    for (int m = 0; m < N_METHODS; ++m) {
+        setup[m].options = solver_options;
+        if (m == Baseline) {
+            setup[m].options.init_guess_type = Estimator::Options::Straight;
+            continue;
+        }
+        setup[m].options.init_guess_type = Estimator::Options::Custom;
+        setup[m].options.custom_guess    = from_model[m].initial_guess;
+        if (m == StrainMeas) setup[m].model_measurements = from_model[m].measurements;
+        else                 setup[m].control_inputs     = from_model[m].control_inputs;
+    }
+
+    // --- 4. Trials: same noisy tip measurement for every method -------------
+    std::vector<TrialResult> trials;
     trials.reserve(args.n_trials);
-    TrialState last_state;
-
     for (unsigned int t = 0; t < args.n_trials; ++t) {
-        const unsigned int seed = args.seed + t;
-        const bool capture_state = (t == args.n_trials - 1);
-        trials.push_back(runTrial(
-            topology, params, base_opts_robust, ep_strain, ep_force,
-            diskFrames_real, s_disk_real, Ti0, p_gt,
-            robot_idx, K, L, args.sigma, seed,
-            capture_state ? &last_state : nullptr));
+        TrialResult trial;
+        trial.seed = args.seed + t;
+        const SensorMeas tip_meas = noisyTipMeasurement(T_tip_true, args.sigma, trial.seed, robot_idx, K);
+        trial.T_tip_noisy = tip_meas.value;
+        for (int m = 0; m < N_METHODS; ++m)
+            trial.method[m] = runEstimator(topology, params, setup[m], tip_meas, p_truth, robot_idx);
+        trials.push_back(std::move(trial));
     }
 
     // --- 5. Aggregate stats -------------------------------------------------
-    auto collect = [&](double TrialMetrics::*member) {
-        std::vector<double> v;
-        v.reserve(trials.size());
-        for (const auto& m : trials) v.push_back(m.*member);
-        return meanStd(v);
-    };
-    auto convergedCount = [&](bool TrialMetrics::*member) {
-        std::size_t n = 0;
-        for (const auto& m : trials) if (m.*member) ++n;
-        return n;
-    };
-
-    const auto s_rmse_old    = collect(&TrialMetrics::rmse_old);
-    const auto s_rmse_strain = collect(&TrialMetrics::rmse_strain);
-    const auto s_rmse_force  = collect(&TrialMetrics::rmse_force);
-    const auto s_max_old     = collect(&TrialMetrics::max_old);
-    const auto s_max_strain  = collect(&TrialMetrics::max_strain);
-    const auto s_max_force   = collect(&TrialMetrics::max_force);
-    const auto s_time_old    = collect(&TrialMetrics::time_old);
-    const auto s_time_strain = collect(&TrialMetrics::time_strain);
-    const auto s_time_force  = collect(&TrialMetrics::time_force);
-
-    const std::size_t conv_old    = convergedCount(&TrialMetrics::ok_old);
-    const std::size_t conv_strain = convergedCount(&TrialMetrics::ok_strain);
-    const std::size_t conv_force  = convergedCount(&TrialMetrics::ok_force);
+    std::array<MethodStats, N_METHODS> stats;
+    for (int m = 0; m < N_METHODS; ++m) stats[m] = statsOf(trials, m);
 
     // --- 6. Reporting -------------------------------------------------------
     //
     // Layout (each block separated by a blank line):
-    //   1. Cosserat ground truth      — tip positions + prior-truth gap.
+    //   1. Cosserat ground truth      — tip positions + model-truth gap.
     //   2. Headline                   — one-paragraph plain-English verdict.
     //   3. Per-method results table   — mm-based, fixed-point.
-    //   4. Comparisons                — relative numbers (vs. prior, vs. method 1).
+    //   4. Comparisons                — relative numbers (vs. model, vs. Baseline).
     //
     // The headline is computed AFTER the trials run; it picks winners on each
     // axis (accuracy / speed) among methods that produced a usable shape
     // (RMSE < L/2).
 
-    const double L_mm = L * 1000.0;
-    const double half_L_mm = L_mm * 0.5;
-    const Stat rmse_means[3] = { s_rmse_old, s_rmse_strain, s_rmse_force };
-    const Stat time_means[3] = { s_time_old, s_time_strain, s_time_force };
-    const std::size_t conv_counts[3] = { conv_old, conv_strain, conv_force };
-    const char* method_names[3] = { "Baseline (tip only)",
-                                    "Strain as measurement",
-                                    "Force as input" };
+    const double half_L_mm = L * 1000.0 * 0.5;
+    auto rmseMm = [&](int m) { return stats[m].rmse.mean * 1000.0; };
+    auto timeMs = [&](int m) { return stats[m].time_ms.mean; };
+    auto isFailed = [&](int m) { return rmseMm(m) >= half_L_mm || stats[m].converged == 0; };
 
     int accuracy_winner = -1, speed_winner = -1;
-    double best_rmse_m = std::numeric_limits<double>::infinity();
-    double best_time_ms = std::numeric_limits<double>::infinity();
-    for (int i = 0; i < 3; ++i) {
-        const bool valid = (rmse_means[i].mean * 1000.0 < half_L_mm);
-        if (!valid) continue;
-        if (rmse_means[i].mean < best_rmse_m) { best_rmse_m  = rmse_means[i].mean; accuracy_winner = i; }
-        if (time_means[i].mean < best_time_ms) { best_time_ms = time_means[i].mean; speed_winner    = i; }
+    for (int m = 0; m < N_METHODS; ++m) {
+        if (rmseMm(m) >= half_L_mm) continue;
+        if (accuracy_winner < 0 || rmseMm(m) < rmseMm(accuracy_winner)) accuracy_winner = m;
+        if (speed_winner    < 0 || timeMs(m) < timeMs(speed_winner))    speed_winner    = m;
     }
-    auto isFailed = [&](int i) {
-        return rmse_means[i].mean * 1000.0 >= half_L_mm || conv_counts[i] == 0;
-    };
 
     // --- Block 1: Cosserat ground truth ------------------------------------
     std::cout << "Cosserat ground truth\n"
-              << "  Prior tip position  : " << fmtVec3Mm(p_prior.back()) << "\n"
-              << "  Truth tip position  : " << fmtVec3Mm(p_gt.back())   << "\n"
+              << "  Prior tip position  : " << fmtVec3Mm(p_model.back()) << "\n"
+              << "  Truth tip position  : " << fmtVec3Mm(p_truth.back()) << "\n"
               << "  Prior<->truth gap   : "
-              << std::fixed << std::setprecision(2) << prior_truth_rmse * 1000.0
+              << std::fixed << std::setprecision(2) << model_rmse * 1000.0
               << " mm RMSE   (baseline without estimator)\n\n";
 
     // --- Block 2: Headline -------------------------------------------------
@@ -667,44 +638,37 @@ int main(int argc, char* argv[])
                   << std::fixed << std::setprecision(0) << half_L_mm << " mm).\n";
     } else if (accuracy_winner == speed_winner) {
         const int w = accuracy_winner;
-        std::cout << "  " << method_names[w]
+        std::cout << "  " << kMethodName[w]
                   << " wins on BOTH accuracy and speed: "
                   << std::fixed << std::setprecision(2)
-                  << rmse_means[w].mean * 1000.0 << " mm RMSE in "
-                  << time_means[w].mean << " ms.\n";
+                  << rmseMm(w) << " mm RMSE in " << timeMs(w) << " ms.\n";
         // Show the speedup against the slowest other method.
-        int slow_i = (w == 0) ? 1 : 0;
-        for (int i = 0; i < 3; ++i)
-            if (i != w && time_means[i].mean > time_means[slow_i].mean) slow_i = i;
-        if (rmse_means[slow_i].mean * 1000.0 < half_L_mm) {
+        int slow = (w == 0) ? 1 : 0;
+        for (int m = 0; m < N_METHODS; ++m)
+            if (m != w && timeMs(m) > timeMs(slow)) slow = m;
+        if (rmseMm(slow) < half_L_mm) {
             std::cout << "  That is "
-                      << std::fixed << std::setprecision(1)
-                      << rmse_means[slow_i].mean / rmse_means[w].mean
+                      << std::fixed << std::setprecision(1) << rmseMm(slow) / rmseMm(w)
                       << "x more accurate and "
-                      << std::setprecision(0) << time_means[slow_i].mean / time_means[w].mean
-                      << "x faster than " << method_names[slow_i] << ".\n";
+                      << std::setprecision(0) << timeMs(slow) / timeMs(w)
+                      << "x faster than " << kMethodName[slow] << ".\n";
         }
     } else {
         std::cout << "  Mixed result (we are past the crossover where the prior stops helping on accuracy):\n"
-                  << "    " << method_names[accuracy_winner] << " wins on accuracy: "
-                  << std::fixed << std::setprecision(2)
-                  << rmse_means[accuracy_winner].mean * 1000.0 << " mm RMSE.\n"
-                  << "    " << method_names[speed_winner]    << " wins on speed:    "
-                  << std::fixed << std::setprecision(2)
-                  << time_means[speed_winner].mean << " ms ("
-                  << std::setprecision(0)
-                  << time_means[accuracy_winner].mean / time_means[speed_winner].mean
-                  << "x faster than " << method_names[accuracy_winner] << ").\n";
+                  << "    " << kMethodName[accuracy_winner] << " wins on accuracy: "
+                  << std::fixed << std::setprecision(2) << rmseMm(accuracy_winner) << " mm RMSE.\n"
+                  << "    " << kMethodName[speed_winner]    << " wins on speed:    "
+                  << std::fixed << std::setprecision(2) << timeMs(speed_winner) << " ms ("
+                  << std::setprecision(0) << timeMs(accuracy_winner) / timeMs(speed_winner)
+                  << "x faster than " << kMethodName[accuracy_winner] << ").\n";
     }
-    for (int i = 0; i < 3; ++i) {
-        if (isFailed(i)) {
-            std::cout << "  " << method_names[i] << " FAILS: "
-                      << std::fixed << std::setprecision(1)
-                      << rmse_means[i].mean * 1000.0 << " mm RMSE";
-            if (conv_counts[i] == 0)
-                std::cout << ", " << conv_counts[i] << "/" << args.n_trials << " converged";
-            std::cout << ".\n";
-        }
+    for (int m = 0; m < N_METHODS; ++m) {
+        if (!isFailed(m)) continue;
+        std::cout << "  " << kMethodName[m] << " FAILS: "
+                  << std::fixed << std::setprecision(1) << rmseMm(m) << " mm RMSE";
+        if (stats[m].converged == 0)
+            std::cout << ", " << stats[m].converged << "/" << args.n_trials << " converged";
+        std::cout << ".\n";
     }
     std::cout << "\n";
 
@@ -713,24 +677,19 @@ int main(int argc, char* argv[])
     // Column layout (every width below is in *visual* columns, not bytes):
     //
     //   "  [mark] [name padded W_NAME]  [RMSE W_VAL]  [MaxErr W_VAL]  [Time W_VAL]  [Conv W_CONV]"
-    //      ^^^^                          ^^^^                ^^^^                ^^^^         ^^^^^
-    //      W_MARK                         16                 16                 16            8
     //
-    // The fmt*Std helpers do their own visual-width padding (they handle the
-    // ± byte/visual mismatch internally), so we do NOT wrap them in std::setw
-    // at the call site — only header strings (pure ASCII) use std::setw.
+    // fmtMeanStd does its own visual-width padding (it handles the ± byte/visual
+    // mismatch internally), so we do NOT wrap it in std::setw at the call site —
+    // only header strings (pure ASCII) use std::setw.
     constexpr int W_MARK = 3;
     constexpr int W_NAME = 24;
     constexpr int W_VAL  = 16;     // applies to RMSE, MaxErr, Time columns
     constexpr int W_CONV = 8;
     const std::string SEP = "  ";  // 2-space column separator
 
-    const int line_width =
-        2 + W_MARK + 1 + W_NAME
-          + static_cast<int>(SEP.size()) + W_VAL
-          + static_cast<int>(SEP.size()) + W_VAL
-          + static_cast<int>(SEP.size()) + W_VAL
-          + static_cast<int>(SEP.size()) + W_CONV;
+    const int line_width = 2 + W_MARK + 1 + W_NAME
+                         + 3 * (static_cast<int>(SEP.size()) + W_VAL)
+                         + static_cast<int>(SEP.size()) + W_CONV;
     const std::string hline = std::string(line_width, '-');
 
     std::cout << "Per-method results  (mean " << "\xC2\xB1" << " 1 std over "
@@ -744,25 +703,21 @@ int main(int argc, char* argv[])
               << SEP <<               std::setw(W_CONV) << "Conv"
               << "\n" << hline << "\n";
 
-    auto printRow = [&](int idx, const char* short_name, Stat rmse, Stat maxe, Stat tms, std::size_t conv) {
+    for (int m = 0; m < N_METHODS; ++m) {
         // Markers: [*] = winner on at least one axis; [X] = failed/invalid.
         const char* marker = "   ";
-        if (isFailed(idx))                                       marker = "[X]";
-        else if (idx == accuracy_winner || idx == speed_winner)  marker = "[*]";
-
-        const std::string conv_str = std::to_string(conv) + "/" + std::to_string(args.n_trials);
-
+        if (isFailed(m))                                     marker = "[X]";
+        else if (m == accuracy_winner || m == speed_winner)  marker = "[*]";
+        const MethodStats& s = stats[m];
+        const std::string conv = std::to_string(s.converged) + "/" + std::to_string(args.n_trials);
         std::cout << "  " << std::left  << std::setw(W_MARK) << marker << " "
-                  <<        std::setw(W_NAME) << short_name
-                  << SEP << fmtMmStd(rmse.mean, rmse.std, W_VAL)
-                  << SEP << fmtMmStd(maxe.mean, maxe.std, W_VAL)
-                  << SEP << fmtMsStd(tms.mean,  tms.std,  W_VAL)
-                  << SEP << std::right << std::setw(W_CONV) << conv_str
+                  <<        std::setw(W_NAME) << kTableLabel[m]
+                  << SEP << fmtMeanStd(s.rmse.mean * 1000.0,    s.rmse.std * 1000.0,    W_VAL)
+                  << SEP << fmtMeanStd(s.max_err.mean * 1000.0, s.max_err.std * 1000.0, W_VAL)
+                  << SEP << fmtMeanStd(s.time_ms.mean,          s.time_ms.std,          W_VAL)
+                  << SEP << std::right << std::setw(W_CONV) << conv
                   << "\n";
-    };
-    printRow(0, "1. Baseline (tip only)",   s_rmse_old,    s_max_old,    s_time_old,    conv_old);
-    printRow(1, "2. Strain as measurement", s_rmse_strain, s_max_strain, s_time_strain, conv_strain);
-    printRow(2, "3. Force as input",        s_rmse_force,  s_max_force,  s_time_force,  conv_force);
+    }
     std::cout << hline << "\n"
               << "  [*] = best on at least one axis     [X] = failed (RMSE > L/2 or 0 converged)\n"
               << "  Adapter prep (one-shot, not included in per-trial timings): "
@@ -770,89 +725,49 @@ int main(int argc, char* argv[])
 
     // --- Block 4: comparisons ----------------------------------------------
     std::cout << "Comparisons\n";
-    const double gap_mm = prior_truth_rmse * 1000.0;
+    const double gap_mm = model_rmse * 1000.0;
     std::cout << "  vs. prior" << "\xE2\x86\x94" << "truth gap ("
               << std::fixed << std::setprecision(2)
               << gap_mm << " mm - the no-estimator baseline):\n";
-    for (int i = 0; i < 3; ++i) {
-        const double rmse_mm = rmse_means[i].mean * 1000.0;
+    for (int m = 0; m < N_METHODS; ++m) {
         std::ostringstream tag;
-        if (gap_mm > 0 && rmse_mm < gap_mm) {
-            const double pct = (gap_mm - rmse_mm) / gap_mm * 100.0;
-            tag << std::fixed << std::setprecision(0) << pct << "% better than prior";
+        if (gap_mm > 0 && rmseMm(m) < gap_mm) {
+            tag << std::fixed << std::setprecision(0) << (gap_mm - rmseMm(m)) / gap_mm * 100.0
+                << "% better than prior";
         } else if (gap_mm > 0) {
-            const double ratio = rmse_mm / gap_mm;
-            tag << std::fixed << std::setprecision(1) << ratio << "x WORSE than prior";
+            tag << std::fixed << std::setprecision(1) << rmseMm(m) / gap_mm << "x WORSE than prior";
         }
-        std::cout << "    " << std::left << std::setw(28) << method_names[i] << std::right
+        std::cout << "    " << std::left << std::setw(28) << kMethodName[m] << std::right
                   << " : " << std::fixed << std::setprecision(2)
-                  << std::setw(7) << rmse_mm << " mm   (" << tag.str() << ")\n";
+                  << std::setw(7) << rmseMm(m) << " mm   (" << tag.str() << ")\n";
     }
     std::cout << "\n"
               << "  Strain as measurement vs Baseline:\n"
               << "    Accuracy: " << std::fixed << std::setprecision(2)
-              << s_rmse_strain.mean * 1000.0 << " vs " << s_rmse_old.mean * 1000.0 << " mm";
-    if (s_rmse_old.mean > 0) {
-        const double pct = (s_rmse_strain.mean - s_rmse_old.mean) / s_rmse_old.mean * 100.0;
+              << rmseMm(StrainMeas) << " vs " << rmseMm(Baseline) << " mm";
+    if (rmseMm(Baseline) > 0) {
+        const double pct = (rmseMm(StrainMeas) - rmseMm(Baseline)) / rmseMm(Baseline) * 100.0;
         std::cout << "  ("
                   << std::fixed << std::setprecision(0) << std::abs(pct) << "% "
                   << (pct < 0 ? "better" : "worse") << ")";
     }
     std::cout << "\n    Speed:    "
-              << std::fixed << std::setprecision(2) << s_time_strain.mean << " vs "
-              << s_time_old.mean << " ms   ("
+              << std::fixed << std::setprecision(2) << timeMs(StrainMeas) << " vs "
+              << timeMs(Baseline) << " ms   ("
               << std::fixed << std::setprecision(1)
-              << s_time_old.mean / s_time_strain.mean << "x faster)\n\n";
+              << timeMs(Baseline) / timeMs(StrainMeas) << "x faster)\n\n";
 
-    // --- 6a. Optional per-trial results: one row per trial and method, plus
-    // one "0_model" row (trial = -1) for the no-force model on its own.
-    // Errors in metres; e0..e{K-1} are the per-node position errors.
-    if (!args.trials_csv_path.empty()) {
-        const bool exists = std::ifstream(args.trials_csv_path).good();
-        std::ofstream f(args.trials_csv_path, std::ios::app);
-        if (!f) {
-            std::cerr << "Failed to open trials-csv path: " << args.trials_csv_path << "\n";
-        } else {
-            if (!exists) {
-                f << "fx,fy,fz,sigma,L,trial,seed,method,rmse,max_err,time_ms,iterations,converged";
-                for (unsigned int k = 0; k < K; ++k) f << ",e" << k;
-                f << "\n";
-            }
-            f << std::setprecision(9);
-            auto writeTrial = [&](long trial, long seed, const char* method, double rmse,
-                                  double max_err, double time_ms, std::size_t iters,
-                                  bool converged, const std::vector<double>& err) {
-                f << args.fx << "," << args.fy << "," << args.fz << "," << args.sigma << ","
-                  << L << "," << trial << "," << seed << "," << method << ","
-                  << rmse << "," << max_err << "," << time_ms << "," << iters << ","
-                  << (converged ? 1 : 0);
-                for (double e : err) f << "," << e;
-                f << "\n";
-            };
-            std::vector<double> err_prior(K);
-            for (unsigned int k = 0; k < K; ++k) err_prior[k] = (p_prior[k] - p_gt[k]).norm();
-            writeTrial(-1, -1, "0_model", prior_truth_rmse,
-                       *std::max_element(err_prior.begin(), err_prior.end()), 0.0, 0, true, err_prior);
-            for (std::size_t t = 0; t < trials.size(); ++t) {
-                const auto& m = trials[t];
-                writeTrial(t, m.seed, "1_old",    m.rmse_old,    m.max_old,    m.time_old,    m.iters_old,    m.ok_old,    m.err_old);
-                writeTrial(t, m.seed, "2_strain", m.rmse_strain, m.max_strain, m.time_strain, m.iters_strain, m.ok_strain, m.err_strain);
-                writeTrial(t, m.seed, "3_force",  m.rmse_force,  m.max_force,  m.time_force,  m.iters_force,  m.ok_force,  m.err_force);
-            }
-        }
-    }
-
-    // --- 6b. Optional per-trial CSV dump (last trial) ----------------------
-    if (!args.csv_path.empty()) {
-        writeCSV(args.csv_path, p_prior, p_gt, last_state, robot_idx, L);
-    }
+    // --- 7. Optional CSV output ---------------------------------------------
+    if (!args.trials_csv_path.empty())
+        appendTrialsCsv(args.trials_csv_path, args, L, model_err, trials);
+    if (!args.csv_path.empty())
+        writeShapeCsv(args.csv_path, p_model, p_truth, trials.back(), L);
 
     printBanner("Evaluation OK");
 
     // Exit non-zero if any method failed to converge on the LAST trial — useful
     // for CI checks but harmless for normal use.
-    const bool any_fail = !(trials.back().ok_old &&
-                            trials.back().ok_strain &&
-                            trials.back().ok_force);
-    return any_fail ? 2 : 0;
+    for (const auto& r : trials.back().method)
+        if (!r.converged) return 2;
+    return 0;
 }

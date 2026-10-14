@@ -1,8 +1,8 @@
-# Evaluation: Three Ways to Use a Physics Model in Shape Estimation
+# Evaluation: Four Ways to Use a Physics Model in Shape Estimation
 
 **Reproduce:** `python scripts/evaluate.py all` (Section 8)
 
-A continuum robot is pushed by a force nobody measures. We know its tendon tensions (so a physics model can predict its shape) and we have one noisy sensor at its tip. We compare three ways of combining the two. Telling the estimator *how the bending changes along the rod* (**Force as input**) recovers the real shape to **2.7 mm** on average (1.7 mm in a typical run). That is 2.6–7× better than the alternatives, and needs no tuning. Its one weakness: in about 1 run in 8, mostly when the force is small, it finds a wrong shape that bows out of the bending plane.
+A continuum robot is pushed by a force nobody measures. We know its tendon tensions (so a physics model can predict its shape) and we have one noisy sensor at its tip. We compare four ways of combining the two. The two methods that hand the model to the estimator as a **control input** are clearly best: **Force as input** (how the bending changes along the rod) recovers the real shape to **2.7 mm** on average, **Strain as input** (the bending itself) to **2.8 mm**. That is 2.4–7× better than the alternatives, and neither needs tuning. Strain as input is the most accurate when the force is small; Force as input is the most accurate under larger forces and converges far more reliably.
 
 ![Average error per method](figures/fig3_ranking.png)
 
@@ -10,7 +10,8 @@ A continuum robot is pushed by a force nobody measures. We know its tendon tensi
 
 **At a glance**
 
-- **Force as input is the most accurate.** Its typical (median) error is 1.2–2.3 mm at every force. In 44 of 350 runs it bows out of the plane (5–14 mm off); these are frequent with no force (17 of 50) and absent at the largest force.
+- **Force as input** has a typical (median) error of 1.2–2.3 mm at every force. In 44 of 350 runs it bows out of the plane (5–14 mm off); these are frequent with no force (17 of 50) and absent at the largest force.
+- **Strain as input** is the most accurate with no or little force (1.5 mm at 0 N), but its error grows with the force (4.1 mm at 0.30 N). It converges slowly: under a force most runs hit the 100-iteration limit.
 - **Strain as measurement depends entirely on how much it trusts the model.** Trusting it a lot is worse than not estimating at all once the robot is pushed. Trusting it little gives 4–12 mm. No single setting is best.
 - **The Baseline**, the tip sensor alone, gets a smooth curve through the tip but misses where the S flips: 16 mm with no force, improving to 8 mm as the force flattens the S.
 
@@ -35,27 +36,28 @@ Two imperfect sources of information are available:
 
 A **state estimator** combines both into one best guess of the shape. **The question of this evaluation is how the model's prediction should be handed to the estimator** so that the guess stays accurate when an unknown force pushes the robot away from the prediction.
 
-## 2. The three methods, and why these three
+## 2. The four methods, and why these four
 
 The estimator always receives the tip measurement. The methods differ in **what they tell it about the model**:
 
 | Method (name in figures) | What the estimator is told | Intuition | Source |
 |---|---|---|---|
 | **Baseline: tip measurement only** | Nothing from the model; only that the rod bends smoothly | "Here is where the tip is; work out the rest." | Lilge et al., T-RO 2024 |
-| **Strain as measurement** | The model's **bending at every point** ("the curvature here is +8 1/m"), weighted by a trust setting $\sigma$ | A detailed map, drawn before the robot was pushed | Strain measurement of Lilge et al. 2024 |
-| **Force as input** | Only **how the bending changes** along the rod ("the curvature flips by 16 1/m at the junction, otherwise stays constant"), derived from the forces the tendons apply | Turn-by-turn directions: still right after the push, while the tip sensor says where you end up | Lilge & Barfoot 2025, eq. 34b |
+| **Strain as measurement** | The model's **bending at every point** ("the curvature here is +8 1/m") as measurements, weighted by a trust setting $\sigma$ | A detailed map, drawn before the robot was pushed | Strain measurement of Lilge et al. 2024 |
+| **Strain as input** | The same bending, but as the **input of the estimator's motion model** (velocity input). The estimator only estimates a smooth correction on top of it | The same map, which the estimator may shift as a whole | Lilge & Barfoot 2025, eq. 34a |
+| **Force as input** | Only **how the bending changes** along the rod ("the curvature flips by 16 1/m at the junction, otherwise stays constant"), derived from the forces the tendons apply (acceleration input) | Turn-by-turn directions: still right after the push, while the tip sensor says where you end up | Lilge & Barfoot 2025, eq. 34b |
 | *Model only* (reference) | No estimator: just the model's prediction | What you get without any sensor | – |
 
-**Why these three.** They span the possible answers:
+**Why these four.** They span the possible answers:
 - **Baseline** shows what the sensor alone can do.
 - **Strain as measurement** is the most direct use of the model: assert its values. Its trust setting $\sigma$ (`R_v = R_u` in the config) says how strongly. The figures call σ = 0.01 / 0.1 / 0.5 **high / medium / low trust**.
-- **Force as input** is the physically motivated alternative from the 2025 control-input paper. The tendons fix *how* the bending changes along the rod. An external force mainly changes *how much* the rod bends, which this method leaves to the sensor.
+- **Strain as input** and **Force as input** are the two input levels of the 2025 control-input paper. An input does not assert the shape; it tells the estimator's prior what to expect, and the sensor may still move the estimate. Strain as input hands over the bending itself; Force as input only its change along the rod. An external force mainly changes *how much* the rod bends, which Force as input leaves entirely to the sensor.
 
-**How Force as input is computed.** Its input is the change in strain caused by the tendon loads, taken from Rucker & Webster 2011:
-- the distributed loads, $-K^{-1}[R^\top f_t;\ R^\top l_t]$, from eq. 5;
-- the jump where tendons 1–3 end, $-K^{-1}[R^\top F_{end1};\ R^\top L_{end1}]$, from eq. 20, spread over the 20 mm segment after the junction.
+**How the inputs are computed.**
+- **Strain as input:** the model's strain in each 20 mm segment between two nodes, taken at the segment's midpoint. The estimator's state strain is then only the correction (the "bias"); it starts at 0.
+- **Force as input:** the change in strain caused by the tendon loads, from Rucker & Webster 2011: the distributed loads, $-K^{-1}[R^\top f_t;\ R^\top l_t]$ (eq. 5), and the jump where tendons 1–3 end, $-K^{-1}[R^\top F_{end1};\ R^\top L_{end1}]$ (eq. 20), spread over the 20 mm segment after the junction.
 
-In code the methods are `ControlInputMode::None` (Strain as measurement) and `ControlInputMode::ForceAsInput`. The other input type of Lilge & Barfoot 2025, the strain as a velocity input (eq. 34a, `StrainAsInput`), is implemented and tested (integration doc, Section 5) but not yet part of this comparison.
+In code the methods are `ControlInputMode::None` (Strain as measurement), `ControlInputMode::StrainAsInput` and `ControlInputMode::ForceAsInput`. Both input methods use the inputs and the tip only, without strain measurements.
 
 ## 3. How the experiment works
 
@@ -67,7 +69,7 @@ In code the methods are `ControlInputMode::None` (Strain as measurement) and `Co
 
 Think of the experiment as a grid of runs. Each run picks one setting on each of three dials, simulates the robot, and estimates its shape once.
 
-1. **Which method estimates the shape:** Baseline, Strain as measurement, or Force as input. The model's own prediction ("model only") is shown next to them as a reference, but it is not an estimator.
+1. **Which method estimates the shape:** Baseline, Strain as measurement, Strain as input or Force as input. The model's own prediction ("model only") is shown next to them as a reference, but it is not an estimator.
 2. **How hard the robot is pushed:** the unknown tip force F is 0, 0.05, 0.10, 0.15, 0.20, 0.25 or 0.30 N. It pushes the tip along the rod's base axis (to the right in the shape figures). This dial sets **how wrong the model is**: at 0 N its prediction is exactly right; at 0.30 N its predicted tip is about 4 cm away from the real one.
 3. **Which random noise the tip sensor adds:** 50 different noise draws for each force. **Every method gets exactly the same 50 noisy measurements**, so any difference between methods comes from the methods, not from luck.
 
@@ -75,7 +77,7 @@ Strain as measurement has one extra setting: **how much it trusts the model** (�
 
 | Dial | Settings | Why |
 |---|---|---|
-| Method | 3 methods, plus "model only" as a reference | What we compare |
+| Method | 4 methods, plus "model only" as a reference | What we compare |
 | Unknown tip force F | 7 levels: 0 to 0.30 N in steps of 0.05 N | How wrong the model is (0 N = exact; 0.30 N = tip about 4 cm off) |
 | Sensor noise draw | 50 per force level, identical for every method | A fair comparison that does not depend on luck |
 | Trust σ (Strain as measurement only) | 0.01 / 0.1 / 0.5 = high / medium / low | That method's tuning setting |
@@ -96,7 +98,7 @@ Strain as measurement has one extra setting: **how much it trusts the model** (�
 | | Prior flexibility $Q_c$ | diag(0.1, 0.1, 0.1, 1, 1, 1) |
 | | Assumed tip noise | 2.8 mm (`R_p = 0.002`, `R_pose_scale = 2`) |
 | | Solver | Newton with backtracking line search, at most 100 iterations, convergence threshold 1e-3 |
-| | Starting shape | Straight rod for the Baseline; the model's shape for the other two |
+| | Starting shape | Straight rod for the Baseline; the model's shape for the other three |
 | | Rod model | Kirchhoff rod: no stretch or shear, only bending and twist are estimated |
 
 Config: [`config/7_evaluation_s_shape.yaml`](../config/7_evaluation_s_shape.yaml). Driver: [`src/examples/evaluation_cosserat_priors.cpp`](../src/examples/evaluation_cosserat_priors.cpp).
@@ -116,15 +118,15 @@ Config: [`config/7_evaluation_s_shape.yaml`](../config/7_evaluation_s_shape.yaml
 
 ### 4.1 Which method is best
 
-See Figure 3 at the top of this document. Averaged over all 350 runs, **Force as input is 2.7 mm off the real shape**; half of its runs are within 1.7 mm. The next best, Strain as measurement with low trust in the model, is 6.9 mm off. The Baseline (11.6 mm) beats the model used alone (14.6 mm). Strain as measurement with medium or high trust lands past the dashed line: worse than using the model alone, without any estimator.
+See Figure 3 at the top of this document. Averaged over all 350 runs, **Force as input is 2.7 mm off the real shape and Strain as input 2.8 mm**; half of their runs are within 1.7 and 2.7 mm. The next best, Strain as measurement with low trust in the model, is 6.9 mm off. The Baseline (11.6 mm) beats the model used alone (14.6 mm). Strain as measurement with medium or high trust lands past the dashed line: worse than using the model alone, without any estimator.
 
 ### 4.2 What the estimates look like
 
 ![Estimated shapes vs ground truth](figures/fig4_shapes.png)
 
-*Figure 4. Estimated shapes for one trial. **Black is the ground truth**, pushed by the unknown force $F$ (arrow). A method is good when its line lies on the black one. Force as input (blue) does. The Baseline (orange) reaches the tip but takes a flatter path below the real shape. Strain as measurement is shown with low trust, its best setting under a force; it stays between the model and the truth and, under the larger force, misses the tip.*
+*Figure 4. Estimated shapes for one trial. **Black is the ground truth**, pushed by the unknown force $F$ (arrow). A method is good when its line lies on the black one. Force as input (blue) and Strain as input (purple) do; under the larger force Strain as input bulges slightly above the real shape. The Baseline (orange) reaches the tip but takes a flatter path below the real shape. Strain as measurement is shown with low trust, its best setting under a force; it stays between the model and the truth and, under the larger force, misses the tip.*
 
-### 4.3 Why Force as input wins
+### 4.3 Why the input methods win
 
 ![Bending curvature along the rod](figures/fig5_curvature.png)
 
@@ -134,28 +136,29 @@ This figure explains the ranking:
 
 - **The model (gray)** predicts +8.2 in segment 1 and −8.2 in segment 2. The **real shape (black)** has the same flip at the junction, but bends *less* in segment 1 (about +5 to +7), because the force partly straightens it.
 - **Force as input (blue)** is told only the flip. It takes the bending level from the tip sensor, so it reproduces the S-shape with the right level in segment 1. Because the flip is spread over one 20 mm segment, it overshoots slightly in segment 2 (−10 instead of −8) to reach the same tip (Section 6, issue 2).
-- **Strain as measurement (green)** is told the model's *values*, which are wrong in segment 1. It compromises between them and the sensor: its curvature slides gradually from +5 to −4 instead of flipping at the junction.
+- **Strain as input (purple)** is told the model's bending in every segment, and only shifts it. Its flip sits exactly at the junction, because its input switches there from one segment's value to the other's. Under the larger force it keeps segment 1 too strongly bent (+6 instead of about +5) and overshoots segment 2 (−10) to reach the tip.
+- **Strain as measurement (green)** is told the model's *values* as measurements, which are wrong in segment 1. It compromises between them and the sensor: its curvature slides gradually from +5 to −4 instead of flipping at the junction.
 - **The Baseline (orange)** is told nothing about the flip. The smoothest shape that reaches the tip wins: its curvature also slides gradually from + to −, with much weaker bending than the real rod on either side.
 
 ### 4.4 How the error depends on the unknown force
 
-| $F$ (N) | Model only | Baseline | Strain, high trust | Strain, medium trust | Strain, low trust | **Force as input** |
-|---:|---:|---:|---:|---:|---:|---:|
-| 0.00 |  0.00 | 15.66 |  5.98 | **4.18** | 12.37 | 4.69 (median 2.22) |
-| 0.05 |  7.62 | 14.40 | 12.64 | 10.33 |  9.31 | **3.31** (1.39) |
-| 0.10 | 12.81 | 13.17 | 17.26 | 14.71 |  7.32 | **2.62** (1.17) |
-| 0.15 | 16.58 | 11.60 | 20.64 | 17.93 |  5.97 | **2.12** (1.30) |
-| 0.20 | 19.48 |  9.92 | 23.23 | 20.41 |  5.06 | **1.88** (1.57) |
-| 0.25 | 21.79 |  8.91 | 25.30 | 22.39 |  4.47 | **1.95** (1.93) |
-| 0.30 | 23.68 |  7.79 | 26.99 | 24.01 |  4.13 | **2.23** (2.27) |
+| $F$ (N) | Model only | Baseline | Strain meas., high trust | Strain meas., medium trust | Strain meas., low trust | **Strain as input** | **Force as input** |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.00 |  0.00 | 15.66 |  5.98 | 4.18 | 12.37 | **1.54** (0.70) | 4.69 (2.22) |
+| 0.05 |  7.62 | 14.40 | 12.64 | 10.33 |  9.31 | **2.72** (1.19) | 3.31 (1.39) |
+| 0.10 | 12.81 | 13.17 | 17.26 | 14.71 |  7.32 | **2.49** (1.87) | 2.62 (1.17) |
+| 0.15 | 16.58 | 11.60 | 20.64 | 17.93 |  5.97 | 2.53 (2.45) | **2.12** (1.30) |
+| 0.20 | 19.48 |  9.92 | 23.23 | 20.41 |  5.06 | 2.92 (2.90) | **1.88** (1.57) |
+| 0.25 | 21.79 |  8.91 | 25.30 | 22.39 |  4.47 | 3.57 (3.47) | **1.95** (1.93) |
+| 0.30 | 23.68 |  7.79 | 26.99 | 24.01 |  4.13 | 4.09 (3.91) | **2.23** (2.27) |
 
-*Mean shape error in mm over 50 trials. Bold = best mean per row. For Force as input the median is also given: at small forces its mean is pulled up by the out-of-plane runs (Section 4.6). The other methods have mean ≈ median.*
+*Mean shape error in mm over 50 trials; for the input methods the median follows in brackets. Bold = best mean per row. The means of both input methods are pulled up at small forces by out-of-plane runs (Section 4.6). The other methods have mean ≈ median.*
 
-At 0 N, Strain as measurement with medium trust has the lowest mean (4.2 mm vs 4.7 mm), although Force as input's typical run is better (2.2 mm). From 0.05 N on, Force as input is best by both measures.
+Strain as input is best up to 0.10 N; from 0.15 N on, Force as input is best and its error stays flat while that of Strain as input grows.
 
 ![Error vs tip force](figures/fig6_error_vs_force.png)
 
-*Figure 6. The table as curves: median over 50 trials; vertical bars span the middle half of the trials. At $F$ = 0 the model is exact; the further right, the more wrong it is. Force as input stays at 1–2.5 mm; its long bar at 0 N comes from the out-of-plane runs. The Baseline improves as the force grows; Strain as measurement with medium or high trust gets worse.*
+*Figure 6. The table as curves: median over 50 trials; vertical bars span the middle half of the trials. At $F$ = 0 the model is exact; the further right, the more wrong it is. Force as input stays at 1–2.5 mm; its long bar at 0 N comes from the out-of-plane runs. Strain as input starts below 1 mm and rises steadily to about 4 mm. The Baseline improves as the force grows; Strain as measurement with medium or high trust gets worse.*
 
 ### 4.5 Where along the rod the error occurs
 
@@ -166,6 +169,7 @@ At 0 N, Strain as measurement with medium trust has the lowest mean (4.2 mm vs 4
 - **Baseline** is worst in the middle of the rod, where its gradual curve misses the sharp flip; it meets the truth again at the measured tip.
 - **Strain as measurement with high trust** follows the wrong model, so its error grows toward the tip.
 - **Force as input**: the median stays below ~4 mm along the whole rod. At 0 N the shaded band reaches ~13 mm in the middle of the rod; these are the out-of-plane runs, which are right at the tip and wrong in between.
+- **Strain as input** is almost exact with no force. Under a force its error peaks just after the junction (about 6 mm at 0.30 N), where its too-strong bend in segment 1 has accumulated.
 
 ### 4.6 How consistent each method is
 
@@ -176,6 +180,7 @@ At 0 N, Strain as measurement with medium trust has the lowest mean (4.2 mm vs 4
 - **Strain as measurement** is very consistent, but consistently wrong when trusted too much.
 - **The Baseline** is consistent with no force and spreads out as the force grows (6–12 mm at 0.30 N).
 - **Force as input** has two groups of runs. Most land at 1–3 mm. A second group, 5–14 mm off, are runs that bend **out of the plane** of the S: the estimated rod bows sideways (up to 17 mm) and still passes through the measured tip. The second group shrinks as the force grows: 17 of 50 runs at 0 N, 5 at 0.15 N, none at 0.30 N. It is caused by the noise draw: the same draws fail at several forces.
+- **Strain as input** spreads widely with no force (0.02–6 mm): most runs barely move from the model's shape, which is then the truth, and a few bow out of the plane like Force as input (the same noise draws). Under a force it forms a tight cluster (2–3 mm at 0.15 N, 3–7 mm at 0.30 N).
 
 ### 4.7 Speed and convergence
 
@@ -183,53 +188,52 @@ At 0 N, Strain as measurement with medium trust has the lowest mean (4.2 mm vs 4
 |---|---:|---:|---:|
 | Baseline | ~12 ms | 54 | 309 / 350 (88 %) |
 | Strain as measurement | ~1 ms | 3–4 | 350 / 350 (100 %) for every trust setting |
+| Strain as input | ~27 ms | 100 (the limit) | 144 / 350 (41 %): 37 of 50 at 0 N, 7 of 50 at 0.30 N |
 | Force as input | ~5 ms | 23 | 334 / 350 (95 %) |
 
 ![Time per estimate](figures/fig9_runtime.png)
 
-*Figure 9. Computation time for all 350 runs per method (log scale). Strain as measurement is fastest because it starts from the model's shape and the model's values hold it there. Force as input also starts from the model's shape but must find the bending level from the tip. The Baseline starts from a straight rod and needs the most iterations.*
+*Figure 9. Computation time for all 350 runs per method (log scale). Strain as measurement is fastest because it starts from the model's shape and the model's values hold it there. Force as input also starts from the model's shape but must find the bending level from the tip. Strain as input converges slowly under a force, so most of its runs stop at the 100-iteration limit (~27 ms). The Baseline starts from a straight rod.*
 
 Data: all statistics in [`figures/summary.csv`](figures/summary.csv). The per-trial results with per-node errors are written to `figures/data/` by `evaluate.py run` (not committed; see Section 8).
 
 ## 5. Conclusions
 
-**Force as input is the most accurate method: 2.7 mm on average, 1.2–2.3 mm in a typical run at every force.** The unknown force mainly changes *how much* the rod bends. It hardly changes *how the bending changes* along the rod, because that is set by the tendons (Figure 5). Force as input asserts exactly the part that stays valid and leaves the rest to the sensor.
+**Handing the model over as a control input beats handing it over as a measurement.** Both input methods (2.7 and 2.8 mm on average) are 2.4× better than the best-tuned Strain as measurement, and need no trust setting. An input tells the estimator's prior what to expect without asserting the shape, so the tip measurement can still move the estimate to where the robot really is.
 
-**Its weakness is that one tip position does not pin the shape down.** The input says how the bending changes, not its level, and the level must come from the tip. In 44 of 350 runs the solver finds a different shape that reaches the same tip by bowing out of the plane, mostly at small forces (Section 6, issue 1). Without these runs it averages 1.7 mm.
+**Force as input is the best choice under an unknown force: 1.9–2.2 mm from 0.15 N on, and 95 % of runs converge in ~5 ms.** The unknown force mainly changes *how much* the rod bends. It hardly changes *how the bending changes* along the rod, because that is set by the tendons (Figure 5). Force as input asserts exactly the part that stays valid and leaves the rest to the sensor. Its weakness is that one tip position does not pin the shape down: in 44 of 350 runs the solver finds a shape that reaches the same tip by bowing out of the plane, mostly at small forces (Section 6, issue 1). Without these runs it averages 1.7 mm.
+
+**Strain as input is the best choice when the model is nearly right: 1.5–2.7 mm up to 0.10 N.** It places the flip exactly at the junction, where Force as input smears it. But it carries the model's bending *level* too, and only shifts it as a whole; so the more the force changes the bending in one segment, the more it is off (4.1 mm at 0.30 N). It also converges slowly (Section 6, issue 2).
 
 **For Strain as measurement, the trust setting decides everything.** Each model value is weighted by $1/\sigma^2$.
 - **High trust (σ = 0.01):** the 66 asserted values (11 nodes × 6 strain components) outvote the single tip measurement. The estimate barely moves from the model's prediction: the trial-to-trial spread is about 0.05 mm, although the tip noise is 1 mm. As soon as the robot is pushed, this is worse than the model only.
 - **Low trust (σ = 0.5):** the tip measurement can pull the shape away from the prediction. This is the best setting under a force (4.1 mm at 0.30 N), but the worst at $F$ = 0 (12.4 mm), where medium trust is best (4.2 mm).
-- **No single value is best everywhere**, because the right trust depends on how wrong the model is, and that is unknown in practice. Force as input avoids the choice: it never asserts a bending level.
+- **No single value is best everywhere**, because the right trust depends on how wrong the model is, and that is unknown in practice. The input methods avoid the choice.
 
 With a real strain sensor (for example fibre Bragg gratings), σ would be that sensor's noise. Here the "measurements" are the model's prediction, so σ expresses trust in the model.
 
-**The Baseline improves as the force grows** (15.7 → 7.8 mm), the opposite of the model. The force flattens the S, so the real shape comes closer to the smooth curve the Baseline prefers (Section 6, issue 5). It beats Strain as measurement with medium or high trust from 0.10 N on, but never Force as input or Strain as measurement with low trust.
+**The Baseline improves as the force grows** (15.7 → 7.8 mm), the opposite of the model. The force flattens the S, so the real shape comes closer to the smooth curve the Baseline prefers (Section 6, issue 6). It beats Strain as measurement with medium or high trust from 0.10 N on, but never the input methods or Strain as measurement with low trust.
 
-**Speed.** Strain as measurement is fastest (~1 ms) and always converges. Force as input takes ~5 ms and converges in 95 % of runs; the Baseline ~12 ms and 88 %.
+**Speed.** Strain as measurement is fastest (~1 ms) and always converges. Force as input takes ~5 ms and converges in 95 % of runs; the Baseline ~12 ms and 88 %; Strain as input ~27 ms and 41 %.
 
 ## 6. Open issues and caveats
 
-**1. Force as input can bow out of the plane.** The input fixes how the strain changes along the rod, but not its level. The likely cause: with stretch and shear fixed, three numbers (twist and the two bending directions) are left free, and the tip measurement supplies three numbers. That equation has more than one solution: the in-plane S, and shapes that bow sideways (up to 17 mm) and still reach the measured tip. Which one the solver finds depends on the noise draw. A larger force makes the in-plane solution easier to find (17 of 50 runs out of plane at 0 N, none at 0.30 N). **Checks:** add the tip orientation to the measurement, or combine Force as input with a weakly trusted strain measurement that holds the bending level near the model's.
+**1. Both input methods can bow out of the plane.** An input fixes how the strain changes along the rod, but leaves its level partly free. The likely cause: with stretch and shear fixed, three numbers (twist and the two bending directions) are left free, and the tip measurement supplies three numbers. That equation has more than one solution: the in-plane S, and shapes that bow sideways (up to 17 mm) and still reach the measured tip. Which one the solver finds depends on the noise draw. A larger force makes the in-plane solution easier to find (for Force as input: 17 of 50 runs out of plane at 0 N, none at 0.30 N). **Checks:** add the tip orientation to the measurement, or combine an input method with a weakly trusted strain measurement that holds the bending level near the model's.
 
-**2. The junction jump is smeared.** A constant input per segment turns the step into a 20 mm ramp (visible in Figure 5). That costs ~1 mm of position error even with perfect information (adapter test F), and makes segment 2 overshoot.
+**2. Strain as input converges slowly.** Under a force most of its runs stop at the 100-iteration limit (7 of 50 converge at 0.30 N). A test with 1000 iterations (20 runs per force) made every run converge, with similar errors: 3.0, 2.5 and 3.7 mm at 0, 0.15 and 0.30 N, at 17–95 ms per estimate. So its ranking holds, but its 1.5 mm at 0 N is partly flattered: unfinished runs stay near the starting shape, which at 0 N is the truth; run to convergence, more of them bow out of the plane (issue 1).
 
-**3. Only the junction carries information in this test.** In this planar S-shape the bending is constant within each segment, so the distributed-load part of the input is ≈ 0 and everything comes from the junction jump. A 3D shape, or one with varying bending, is needed to test the distributed part.
+**3. The junction jump is smeared in Force as input.** A constant input per segment turns the step into a 20 mm ramp (visible in Figure 5). That costs ~1 mm of position error even with perfect information (adapter test F), and makes segment 2 overshoot. Strain as input does not have this problem.
 
-**4. The input ignores how the tendon loads depend on the shape.** The inputs are computed once from the no-force shape, and the strain-only terms $N(\varepsilon)$ of R&W eq. 5 are left out, as in the 2025 paper's model. For bending this is harmless here. For stretch and shear, though, the tendon force is almost exactly cancelled by $N(\varepsilon)$ (both ≈ 98 in this test). That part of the input is therefore physically wrong, and is only harmless because the Kirchhoff-rod setting fixes stretch and shear. This shape dependence is the planned thesis topic.
+**4. Only the junction carries information in this test.** In this planar S-shape the bending is constant within each segment, so the distributed-load part of Force as input is ≈ 0 and everything comes from the junction jump. A 3D shape, or one with varying bending, is needed to test the distributed part.
 
-**5. The Baseline and low-trust Strain as measurement improve as the force grows** (15.7 → 7.8 mm and 12.4 → 4.1 mm), even though the model gets worse. This force straightens the rod toward the smooth shape both lean toward anyway. Their ranking could change for other force directions. The Baseline also starts from a straight rod, and 41 of its 350 runs hit the 100-iteration limit, 24 of them at 0.25–0.30 N.
+**5. The inputs ignore how the tendon loads depend on the shape.** The inputs are computed once from the no-force shape, and the strain-only terms $N(\varepsilon)$ of R&W eq. 5 are left out of Force as input, as in the 2025 paper's model. For bending this is harmless here. For stretch and shear, though, the tendon force is almost exactly cancelled by $N(\varepsilon)$ (both ≈ 98 in this test). That part of the input is therefore physically wrong, and is only harmless because the Kirchhoff-rod setting fixes stretch and shear. This shape dependence is the planned thesis topic.
 
-**6. Scope.** One planar shape, one force direction, one noise level, simulated data only. The estimator's assumed tip noise (2.8 mm) does not match the simulated noise (1 mm).
+**6. The Baseline and low-trust Strain as measurement improve as the force grows** (15.7 → 7.8 mm and 12.4 → 4.1 mm), even though the model gets worse. This force straightens the rod toward the smooth shape both lean toward anyway. Their ranking could change for other force directions. The Baseline also starts from a straight rod, and 41 of its 350 runs hit the 100-iteration limit, 24 of them at 0.25–0.30 N.
 
-## 7. Next experiments, in priority order
+**7. Scope.** One planar shape, one force direction, one noise level, simulated data only. The estimator's assumed tip noise (2.8 mm) does not match the simulated noise (1 mm).
 
-1. Fix the out-of-plane solutions of Force as input (issue 1): add the tip orientation, or a weakly trusted strain measurement.
-2. Vary the force direction (sideways, opposite) and use 3D tendon tensions, to test issues 3 and 5 and whether Force as input keeps its advantage.
-3. Add the strain as a velocity input (eq. 34a, `StrainAsInput`) as a fourth method, for a complete comparison of the paper's two input levels.
-4. Sweep the sensor noise from 0.5 to 5 mm.
 
-## 8. Reproduce
+## 7. Reproduce
 
 Everything is driven by one script, [`scripts/evaluate.py`](../scripts/evaluate.py), from the repository root. It needs only numpy, pandas and matplotlib.
 
